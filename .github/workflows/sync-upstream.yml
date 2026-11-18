@@ -102,14 +102,30 @@ jobs:
         if: steps.merge.outputs.updated == 'true' || inputs.force
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           ref=${{ steps.tag.outputs.created == 'true' && steps.tag.outputs.tag || 'main' }}
           echo "Dispatching builds on $ref"
+          failed=0
           for wf in build-linux build-macos build-windows; do
-            gh workflow run "$wf.yml" --ref "$ref"
-            echo "  $wf requested"
+            # The REST endpoint is used directly: `gh workflow run` needs the
+            # workflow file to exist on the default branch and reports failures
+            # only through its exit code, which is hard to read from a log that
+            # some networks cannot download.
+            code=$(curl -sS -o /tmp/dispatch.json -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/actions/workflows/$wf.yml/dispatches" \
+              -d "{\"ref\":\"$ref\"}")
+            if [[ $code == 204 ]]; then
+              echo "  $wf requested"
+            else
+              echo "::error::$wf dispatch failed (HTTP $code): $(head -c 300 /tmp/dispatch.json)"
+              failed=1
+            fi
           done
+          exit $failed
 
       - name: Summary
         run: |
