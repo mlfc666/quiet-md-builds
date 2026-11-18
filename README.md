@@ -18,6 +18,12 @@
   <img src="https://img.shields.io/badge/status-beta-orange" alt="Beta">
 </p>
 
+> **This fork (`quiet-md-linux`)** builds every platform and architecture in
+> GitHub Actions and attaches the packages to each `v*` tag: Linux `.deb` /
+> `.tar.gz` / AppImage for x86_64 and aarch64, macOS ZIPs for Apple Silicon and
+> Intel, and a Windows x64 installer (arm64 experimental).
+> See [docs/BUILDS.md](docs/BUILDS.md) for the matrix and the local recipe.
+
 <p align="center">
   <a href="https://download.quiet.md/latest/quiet-md-macos-arm64.zip"><img src="docs/images/download-macos.svg" height="56" alt="Download for macOS"></a>
   &nbsp;

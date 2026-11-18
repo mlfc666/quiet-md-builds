@@ -1,0 +1,87 @@
+name: build-windows
+
+# windows-2022 carries the Visual Studio 2022 C++ tools and Inno Setup 6, which
+# is exactly what package-windows.ps1 expects. arm64 is best effort: the app
+# builds there but the GPIO-style native deps are only exercised on x64.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/build-windows.yml'
+      - 'scripts/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: windows-${{ matrix.arch }}
+    runs-on: windows-2022
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+            experimental: false
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.arch }}
+
+      - name: Build with the VS developer environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio C++ tools were not found' }
+          Import-Module "$vs/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+          $arch = if ('${{ matrix.arch }}' -eq 'x64') { 'x64' } else { 'arm64' }
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=$arch -host_arch=x64"
+          cargo build --release --locked --target ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw 'build failed' }
+          $env:PATH = "$PWD\target\${{ matrix.target }}\release;$env:PATH"
+          scripts/package-windows.ps1 -Iscc "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'packaging failed' }
+
+      - name: Collect packages
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          # package-windows.ps1 hard-codes the x64 name, so an arm64 build would
+          # otherwise ship a file called ...-windows-x64-setup.exe.
+          foreach ($f in Get-ChildItem dist\windows\unsigned\* -Include *.exe,*.sha256 -Recurse) {
+            $name = $f.Name
+            if ('${{ matrix.arch }}' -ne 'x64') { $name = $name -replace 'windows-x64', 'windows-${{ matrix.arch }}' }
+            Copy-Item $f.FullName (Join-Path artifacts $name)
+          }
+          Get-ChildItem artifacts | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quiet-md-windows-${{ matrix.arch }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.arch == 'x64'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: false

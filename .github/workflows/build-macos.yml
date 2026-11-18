@@ -1,0 +1,73 @@
+name: build-macos
+
+# One Apple Silicon runner builds and packages both architectures: release.sh
+# with MACOS_TARGET cross-compiles Intel, and SIGNING_IDENTITY=- gives the
+# ad-hoc signed ZIPs that are the only thing CI can produce without a
+# Developer ID certificate.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/build-macos.yml'
+      - 'scripts/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: macos-${{ matrix.arch }}
+    runs-on: macos-15
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            target: x86_64-apple-darwin
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      SIGNING_IDENTITY: "-"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ matrix.arch }}
+          env-vars: MACOSX_DEPLOYMENT_TARGET
+
+      - name: Package (ad-hoc signed, unsigned-for-notarization)
+        env:
+          MACOS_TARGET: ${{ matrix.arch == 'x86_64' && 'x86_64-apple-darwin' || '' }}
+        run: scripts/release.sh
+
+      - name: Collect packages
+        run: |
+          mkdir -p artifacts
+          find . -maxdepth 2 -name 'quiet-md-*-macos-*-unsigned.zip' -exec cp {} artifacts/ \;
+          find . -maxdepth 2 -name 'quiet-md-*-macos-*-unsigned.zip.sha256' -exec cp {} artifacts/ \;
+          ls -la artifacts
+          test -n "$(ls -A artifacts)" || { echo "::error::no packages produced"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quiet-md-macos-${{ matrix.arch }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: false

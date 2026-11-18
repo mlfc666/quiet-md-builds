@@ -1,0 +1,91 @@
+name: build-linux
+
+# Native builds on two runner generations: Ubuntu 22.04 keeps the glibc 2.35
+# floor that the released Linux builds were verified against, and the arm64
+# runner is Ubuntu 24.04 because no 22.04 arm image exists.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/build-linux.yml'
+      - 'scripts/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+            deb_arch: amd64
+            appimage: true
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            deb_arch: arm64
+            appimage: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK/X11/Wayland/Vulkan build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake clang \
+            libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype-dev \
+            libwayland-dev libx11-xcb-dev libvulkan-dev libssl-dev \
+            libxcb1-dev python3 imagemagick file wget
+
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ matrix.arch }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Unit tests and document-engine fixtures
+        run: cargo test --release --locked -p fdl_core
+
+      - name: Package .deb
+        run: scripts/package-deb.sh
+
+      - name: Package tarball
+        run: scripts/package-linux.sh
+
+      - name: Package AppImage
+        if: matrix.appimage
+        run: scripts/package-appimage.sh
+
+      - name: Collect packages
+        run: |
+          mkdir -p artifacts
+          cp dist/linux/*.deb dist/linux/*.sha256 artifacts/ 2>/dev/null || true
+          cp dist/linux/*.tar.gz artifacts/ 2>/dev/null || true
+          cp dist/linux/*.AppImage* artifacts/ 2>/dev/null || true
+          ls -la artifacts
+          test -n "$(ls -A artifacts)" || { echo "::error::no packages produced"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quiet-md-linux-${{ matrix.arch }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: false
