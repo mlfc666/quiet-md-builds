@@ -71,3 +71,6 @@ jobs:
         with:
           files: artifacts/*
           fail_on_unmatched_files: false
+          # Re-running one architecture must not fail on the files the other
+          # architecture already uploaded.
+          overwrite_files: true
