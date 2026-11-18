@@ -66,7 +66,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
           # package-windows.ps1 hard-codes the x64 name, so an arm64 build would
           # otherwise ship a file called ...-windows-x64-setup.exe.
-          foreach ($f in Get-ChildItem dist\windows\unsigned\* -Include *.exe,*.sha256 -Recurse) {
+          # Only the installer and its checksum: the raw quiet_md.exe that
+          # package-windows.ps1 also drops in that directory is not a package.
+          foreach ($f in Get-ChildItem dist\windows\unsigned\* -Include *-setup.exe,*-setup.exe.sha256 -Recurse) {
             $name = $f.Name
             if ('${{ matrix.arch }}' -ne 'x64') { $name = $name -replace 'windows-x64', 'windows-${{ matrix.arch }}' }
             Copy-Item $f.FullName (Join-Path artifacts $name)
