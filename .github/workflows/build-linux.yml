@@ -64,6 +64,11 @@ jobs:
       - name: Package tarball
         run: scripts/package-linux.sh
 
+      - name: Package Arch (pacman -U)
+        run: |
+          sudo apt-get install -y --no-install-recommends zstd
+          scripts/package-arch.sh
+
       - name: Package AppImage
         if: matrix.appimage
         run: scripts/package-appimage.sh
@@ -73,6 +78,7 @@ jobs:
           mkdir -p artifacts
           cp dist/linux/*.deb dist/linux/*.sha256 artifacts/ 2>/dev/null || true
           cp dist/linux/*.tar.gz artifacts/ 2>/dev/null || true
+          cp dist/linux/*.pkg.tar.zst dist/linux/*.pkg.tar.zst.sha256 artifacts/ 2>/dev/null || true
           cp dist/linux/*.AppImage* artifacts/ 2>/dev/null || true
           ls -la artifacts
           test -n "$(ls -A artifacts)" || { echo "::error::no packages produced"; exit 1; }
