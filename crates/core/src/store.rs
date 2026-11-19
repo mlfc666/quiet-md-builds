@@ -224,6 +224,14 @@ pub struct Settings {
     /// Main window size, remembered like the quick note window's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_size: Option<[f32; 2]>,
+    /// Main window position and the display it was on, so reopening returns
+    /// to the same spot. The origin is in that display's top-left coordinates,
+    /// and the display is named by its UUID — the one identifier that survives
+    /// a restart; a display that is gone makes the window re-centre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_origin: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_display: Option<String>,
     /// 阅读位置: the list offset each document was left at, so switching back
     /// returns to the same place. Kept out of `index.json`: it is window
     /// state, not document metadata.
@@ -1951,7 +1959,11 @@ impl Store {
     }
 
     fn index_has(&self, id: &str) -> bool {
-        self.index.get(id).is_some_and(|m| if m.folder.is_some() { self.flat || self.abs(&m.rel).fs_is_dir() } else { self.path(id).fs_exists() })
+        let Some(m) = self.index.get(id) else { return false };
+        if m.folder.is_some() { return self.flat || self.abs(&m.rel).fs_is_dir() }
+        #[cfg(test)]
+        crate::store::DISK_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.path(id).fs_exists()
     }
 
     /// 彻底删除 a page from the 回收站, with the pages that went with it.
@@ -2160,6 +2172,11 @@ impl Store {
     }
 }
 
+/// Disk existence checks performed by `index_has`; compiled only in tests,
+/// to keep imports O(N) instead of O(N × library) (#216).
+#[cfg(test)]
+pub(crate) static DISK_LOOKUPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2191,6 +2208,23 @@ mod tests {
 
     fn doc(title: &str) -> Document {
         Document { title: crate::model::RichText::plain(title), ..Default::default() }
+    }
+
+    /// #216: importing N files must stay O(N) disk checks — the per-file
+    /// drop used to stat every entry of the library through `move_in_tree`.
+    #[test]
+    fn importing_files_does_not_walk_the_library() {
+        let lib = Lib::new("import-walk");
+        let mut store = lib.open();
+        let folder = store.create_folder("imported", None).unwrap();
+        for _ in 0..30 { store.create_from(&doc("background")).unwrap(); }
+        DISK_LOOKUPS.store(0, std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..10 {
+            let id = store.create_from(&doc("page")).unwrap();
+            store.set_parent(&id, Some(&folder)).unwrap();
+        }
+        let looked = DISK_LOOKUPS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(looked <= 20, "10 imports made {looked} disk checks, not O(N)");
     }
 
     fn doc_with(title: &str, body: &str) -> Document {

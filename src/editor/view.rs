@@ -1965,6 +1965,12 @@ impl Editor {
             }
             (None, None) => return,
         };
+        // A macOS file copy (including WeChat) can contain only native file
+        // references. GPUI returns these before looking for bitmap data.
+        let file_refs = item.as_ref().and_then(|item| item.entries().iter().find_map(|entry| match entry {
+            ClipboardEntry::ExternalPaths(files) => Some(files.paths()),
+            _ => None,
+        }));
         if self.core.in_block_mode() {
             // Paste after the selected blocks.
             if let Some(last) = self.core.block_sel_ids().last().copied() {
@@ -2025,8 +2031,32 @@ impl Editor {
                 blocks.push(Block::text(""));
                 self.core.paste_blocks(blocks);
             }
-        } else if let Some(s) = text.filter(|s| !s.is_empty()) {
-            self.core.paste_markdown(&s);
+        } else {
+            let files = if !rich_target {
+                None
+            } else if let Some(paths) = file_refs.filter(|paths| !paths.is_empty()) {
+                paths.iter().all(|p| super::image::is_local_image_file(p)).then(|| paths.to_vec())
+            } else {
+                text.as_deref().and_then(|s| {
+                    s.lines().map(str::trim).filter(|line| !line.is_empty())
+                        .map(super::image::local_image_path).collect::<Option<Vec<_>>>()
+                }).filter(|paths| !paths.is_empty())
+            };
+            if let Some(files) = files {
+                let mut blocks = Vec::new();
+                for file in files {
+                    match super::image::image_block_from_file(&file) {
+                        Ok(b) => blocks.push(b),
+                        Err(msg) => self.toast(msg, cx),
+                    }
+                }
+                if !blocks.is_empty() {
+                    blocks.push(Block::text(""));
+                    self.core.paste_blocks(blocks);
+                }
+            } else if let Some(s) = text.filter(|s| !s.is_empty()) {
+                self.core.paste_markdown(&s);
+            }
         }
         if let Some(msg) = self.core.notice.take() {
             self.toast(msg, cx);

@@ -318,6 +318,11 @@ pub struct Workspace {
     pub doc_sub: Option<DocSub>,
     /// Last-frame bounds of the open submenu (clicks there keep the menu open).
     pub doc_sub_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Rendered width of the open 「…」 menu, for placing its submenus (#225).
+    pub doc_menu_w: Rc<Cell<Option<f32>>>,
+    /// The same for the sidebar row menu, whose 下载 submenu sits beside it
+    /// (#225).
+    pub row_menu_w: Rc<Cell<Option<f32>>>,
     pub doc_info: Option<DocInfo>,
     /// 版本历史 drawer, open for `HistoryView::id`.
     pub history: Option<crate::history::HistoryView>,
@@ -568,6 +573,8 @@ impl Workspace {
             doc_menu: false,
             doc_sub: None,
             doc_sub_bounds: Rc::new(Cell::new(None)),
+            doc_menu_w: Rc::new(Cell::new(None)),
+            row_menu_w: Rc::new(Cell::new(None)),
             doc_info: None,
             history: None,
             preview: None,
@@ -606,10 +613,22 @@ impl Workspace {
         ws.sort();
         ws.load_home();
         // An empty library opens on 主页's empty state; only a quick note
-        // window starts a document of its own.
-        match document.or_else(|| (!quick).then(|| ws.entries.first().map(|e| e.id.clone())).flatten()) {
+        // window starts a document of its own. The main window returns to the
+        // document read last (#234), or the home page when that is set.
+        match document {
             Some(id) => ws.open(&id, window, cx),
             None if quick => ws.new_doc(window, cx),
+            None if !crate::settings::prefs().start_home => {
+                // Nothing read yet (a fresh library, whose guides all start at
+                // `opened == 0`): the first document, as before — `max_by_key`
+                // keeps the last of equal maxima, which would open the last
+                // guide instead.
+                let id = ws.entries.iter().filter(|e| e.meta.opened > 0).max_by_key(|e| e.meta.opened).or_else(|| ws.entries.first()).map(|e| e.id.clone());
+                match id {
+                    Some(id) => ws.open(&id, window, cx),
+                    None => ws.view = View::Home,
+                }
+            }
             None => ws.view = View::Home,
         }
         // Kept in the top bar (not just a toast): the user should notice.
