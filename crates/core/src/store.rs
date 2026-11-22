@@ -1559,8 +1559,10 @@ impl Store {
 
     /// A title change renames the file (and keeps the links to it); outside
     /// the library a Markdown file is renamed beside itself, kept as it is
-    /// when the name is taken.
-    fn follow_title(&mut self, id: &str, title: &str) -> Result<()> {
+    /// when the name is taken. `renamed`: the title was just changed (not a
+    /// save of the same title), so a name numbered because it was taken
+    /// drops its number once the name is free again (#358).
+    fn follow_title(&mut self, id: &str, title: &str, renamed: bool) -> Result<()> {
         let Some(m) = self.index.get(id) else { return Ok(()) };
         if let Some(old) = m.path.clone().map(PathBuf::from) {
             let name = title.replace(['/', '\\', ':'], "_");
@@ -1591,14 +1593,17 @@ impl Store {
         let rel = m.rel.clone();
         let dir = parent_rel(&rel).to_string();
         let name = base_name(&rel);
-        if m.folder.is_some() {
-            if layout::name_fits(name, &base) { return Ok(()); }
-            let to = join_rel(&dir, &self.free_name(&dir, &base, None, Some(id)));
-            return self.relocate(&[(id.to_string(), to)]);
-        }
-        if layout::name_fits(stem_of(name), &base) { return Ok(()); }
-        let to = join_rel(&dir, &self.free_name(&dir, &base, Some(ext_of(m)), Some(id)));
-        self.relocate(&[(id.to_string(), to)])
+        let ext = m.folder.is_none().then(|| ext_of(m).to_string());
+        let stem = if ext.is_some() { stem_of(name) } else { name };
+        let free = |s: &Self| s.free_name(&dir, &base, ext.as_deref(), Some(id));
+        let to = if layout::name_fits(stem, &base) {
+            // Numbered because the name was taken: kept unless the plain name is free again.
+            if stem == base || !renamed { return Ok(()); }
+            let to = free(self);
+            if ext.as_ref().map_or(to.as_str(), |_| stem_of(&to)) != base { return Ok(()); }
+            to
+        } else { free(self) };
+        self.relocate(&[(id.to_string(), join_rel(&dir, &to))])
     }
 
     /// All documents found on disk. Files and folders made in the Finder are
@@ -1785,7 +1790,7 @@ impl Store {
         // A 数据表 writes its own file as it is edited; saving its page only follows the title.
         if self.kind(id) == DocKind::Table {
             let title = doc.title.text.trim().to_string();
-            if !title.is_empty() && title != self.markdown_title(id) && let Err(e) = self.follow_title(id, &title) { self.warnings.push(format!("未能按标题重命名文件：{e}")); }
+            if !title.is_empty() && title != self.markdown_title(id) && let Err(e) = self.follow_title(id, &title, true) { self.warnings.push(format!("未能按标题重命名文件：{e}")); }
             let t = now();
             let m = self.index.get_mut(id).ok_or_else(|| anyhow::anyhow!("文档不存在"))?;
             m.modified = t;
@@ -1836,7 +1841,9 @@ impl Store {
         let title = doc.title.text.trim().to_string();
         let named = self.named_by_file(id);
         let changed = if named { title != self.markdown_title(id) } else { true };
-        if changed && !(named && title.is_empty()) && let Err(e) = self.follow_title(id, &title) {
+        // A document's title is in its file: changed when it differs from the one `list` read.
+        let renamed = named || self.parsed.get(id).is_some_and(|p| p.2.title != title);
+        if changed && !(named && title.is_empty()) && let Err(e) = self.follow_title(id, &title, renamed) {
             self.warnings.push(format!("未能按标题重命名文件：{e}"));
         }
         let t = now();
@@ -2559,7 +2566,7 @@ impl Store {
         let before = self.file_state(id);
         if self.index.get(id).is_some_and(|m| m.folder.is_some() || m.named_by_file()) {
             // A Markdown file or a 画板 is left as it is: only its name changes.
-            self.follow_title(id, title)?;
+            self.follow_title(id, title, true)?;
             let m = self.index.get_mut(id).unwrap();
             m.modified = now();
             let meta = m.clone();
@@ -2568,8 +2575,12 @@ impl Store {
             return Ok(meta);
         }
         let mut doc = self.load(id)?;
+        let was = doc.title.text.trim().to_string();
         doc.title = crate::model::RichText::plain(title);
-        let meta = self.save_now(id, &doc)?;
+        let mut meta = self.save_now(id, &doc)?;
+        // The save follows the title only as far as `list` last read it.
+        let title = doc.title.text.trim();
+        if was != title && !title.is_empty() { self.follow_title(id, title, true)?; meta = self.index[id].clone(); }
         self.record_file_change(id, before);
         Ok(meta)
     }
@@ -3840,6 +3851,70 @@ mod tests {
         s.apply_file_history(&changes, false).unwrap();
         assert!(s.abs("新夹/乙.xml").fs_is_file() && !s.abs("乙.xml").fs_exists());
         assert!(crate::vfs::read_to_string(s.abs("丙.xml")).unwrap().contains("href=\"新夹/乙.xml\""));
+    }
+
+    /// #358: renaming 「AAA 2」 back to 「AAA」 once 「AAA」 is gone takes the
+    /// name; while it is taken the number stays as it is.
+    #[test]
+    fn renaming_back_to_a_freed_name_takes_it() {
+        let lib = Lib::new("rename-freed");
+        let mut s = lib.open();
+        // The exact names in the folder, whatever the disk does with case.
+        let names = |s: &Store| -> Vec<String> {
+            let mut v: Vec<String> = crate::vfs::read_dir(&s.root).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| !n.starts_with('.')).collect();
+            v.sort();
+            v
+        };
+        let file = |s: &Store, id: &str| s.index[id].rel.clone();
+        // Folders.
+        let a = s.create_folder("AAA", None).unwrap();
+        let b = s.create_folder("AAA", None).unwrap();
+        assert_eq!(file(&s, &b), "AAA 2");
+        s.rename(&b, "AAA").unwrap();
+        assert_eq!(file(&s, &b), "AAA 2", "taken: the number stays, not 「AAA 3」");
+        s.rename(&b, "AAA 2").unwrap();
+        assert_eq!(file(&s, &b), "AAA 2", "unchanged");
+        s.delete(&a, None).unwrap();
+        s.rename(&b, "AAA").unwrap();
+        assert_eq!(file(&s, &b), "AAA");
+        assert_eq!(names(&s), ["AAA"]);
+        s.rename(&b, "aaa").unwrap();
+        assert_eq!(file(&s, &b), "aaa");
+        assert_eq!(names(&s), ["aaa"], "a change of case renames the folder");
+        // 「AAA 3」 next to a taken 「AAA」 and a free 「AAA 2」 is not renumbered.
+        let c = s.create_folder("AAA", None).unwrap();
+        let d = s.create_folder("AAA 3", None).unwrap();
+        assert_eq!(file(&s, &c), "AAA 2");
+        s.delete(&c, None).unwrap();
+        s.rename(&d, "AAA").unwrap();
+        assert_eq!(file(&s, &d), "AAA 3");
+        s.delete(&b, None).unwrap();
+        s.delete(&d, None).unwrap();
+        // Documents, renamed from the list.
+        let e = s.create_from(&doc("BBB")).unwrap();
+        let f = s.create_from(&doc("BBB 2")).unwrap();
+        s.rename(&f, "BBB").unwrap();
+        assert_eq!(file(&s, &f), "BBB 2.xml", "taken: the number stays");
+        s.rename(&f, "BBB 2").unwrap();
+        assert_eq!(file(&s, &f), "BBB 2.xml");
+        s.delete(&e, None).unwrap();
+        s.rename(&f, "BBB").unwrap();
+        assert_eq!(file(&s, &f), "BBB.xml");
+        s.rename(&f, "bbb").unwrap();
+        assert_eq!(names(&s), ["bbb.xml"], "a change of case renames the file");
+        // …and typed in the editor; a save of the same title leaves the number alone.
+        let g = s.create_from(&doc("CCC")).unwrap();
+        let h = s.create_from(&doc("CCC")).unwrap();
+        assert_eq!(file(&s, &h), "CCC 2.xml");
+        s.list();
+        s.delete(&g, None).unwrap();
+        s.save(&h, &doc("CCC")).unwrap();
+        assert_eq!(file(&s, &h), "CCC 2.xml", "the title did not change");
+        s.save(&h, &doc("CCC 2")).unwrap();
+        s.list();
+        s.save(&h, &doc("CCC")).unwrap();
+        assert_eq!(file(&s, &h), "CCC.xml");
+        assert!(s.abs("CCC.xml").fs_is_file() && !s.abs("CCC 2.xml").fs_exists());
     }
 
     /// What is done in the Finder shows: new folders and files, removed ones,

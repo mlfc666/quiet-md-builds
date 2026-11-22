@@ -172,7 +172,7 @@ impl Store {
                         let out = docxml::serialize(&doc);
                         if out != text { write_atomic(&path, out.as_bytes())?; }
                     }
-                    self.follow_title(&c.id, &to.title)?;
+                    self.follow_title(&c.id, &to.title, true)?;
                     if let Some(m) = self.index.get_mut(&c.id) { m.modified = now(); }
                 }
                 if let Some(m) = self.index.get_mut(&c.id) && from.place() != to.place() {
