@@ -163,6 +163,8 @@ pub struct Editor {
     pub(super) code_rows: HashMap<BlockId, Vec<usize>>,
     /// Slash / "+" menu list (keyboard selection is kept in view).
     pub slash_scroll: ScrollHandle,
+    /// The slash menu's scrollbar: when the list last scrolled (or opened) and the offset then.
+    pub slash_bar: Cell<Option<(std::time::Instant, f32)>>,
     /// Sideways scroll of each unwrapped code block, and its scrollbar.
     pub code_hscroll: RefCell<HashMap<BlockId, (ScrollHandle, Rc<super::scrollbar::Scrollbar>)>>,
     pub mention_scroll: ScrollHandle,
@@ -175,6 +177,8 @@ pub struct Editor {
     pub probes: RefCell<Vec<(super::overlays::Probe, Option<Bounds<Pixels>>)>>,
     pub marked: Option<(BlockId, Range<usize>)>,
     pub dragging: bool,
+    /// A touch long press selected a word and its drag extends the selection (iOS).
+    pub(super) long_press: bool,
     /// Text drag: the pointer's last position and when the page last scrolled
     /// under it (`text_autoscroll`).
     drag_at: Option<Point<Pixels>>,
@@ -430,6 +434,7 @@ impl Editor {
             frame: Default::default(),
             code_rows: HashMap::new(),
             slash_scroll: ScrollHandle::new(),
+            slash_bar: Cell::new(None),
             code_hscroll: Default::default(),
             mention_scroll: ScrollHandle::new(),
             links: Default::default(),
@@ -438,6 +443,7 @@ impl Editor {
             probes: RefCell::new(vec![]),
             marked: None,
             dragging: false,
+            long_press: false,
             drag_at: None,
             drag_scrolled: None,
             drag_active: None,
@@ -614,6 +620,8 @@ impl Editor {
 
     fn changed_with_scroll(&mut self, intent: ScrollIntent, window: &mut Window, cx: &mut Context<Self>) {
         let reveal = intent == ScrollIntent::RevealCaret;
+        // `$x$` typed delimiters first turns into an equation once the caret leaves it.
+        self.core.equation_on_leave();
         if reveal { self.core.reveal_caret(); }
         // A folded code block opens once the caret is inside it.
         if reveal && !self.core.in_block_mode() && self.core.set_code_folded(self.core.sel.head.block, false) {
@@ -1101,6 +1109,17 @@ impl Editor {
     }
 
     // ---- links, languages, colors
+
+    /// The toolbar's 转为公式 (#192): the selected text becomes an inline
+    /// equation and its editor opens; other selections get a hint.
+    pub(super) fn selection_to_equation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.core.clear_block_sel();
+        let Some(p) = self.core.selection_to_equation() else {
+            return self.toast_kind(crate::editor_ui::ToastKind::Info, crate::settings::text("只有同一段里的文字能转为公式"), cx);
+        };
+        self.changed(window, cx);
+        self.open_equation_editor(p, window, cx);
+    }
 
     /// Open the LaTeX editor of the equation at `p` (its source selected).
     pub fn open_equation_editor(&mut self, p: Pos, window: &mut Window, cx: &mut Context<Self>) {
@@ -2502,6 +2521,8 @@ impl Editor {
             self.set_caret(pos, false);
             self.caret_row_end = at_row_end.then_some((pos.block, pos.offset));
         }
+        // A click out of a `$x$` typed delimiters first makes it an equation.
+        if self.core.equation_on_leave() { self.changed_preserving_viewport(window, cx); }
         self.dragging = ev.click_count == 1;
         self.restart_blink(window, cx);
         cx.notify();
@@ -2557,6 +2578,35 @@ impl Editor {
         let kind = if in_sel { CtxKind::Selection } else if pos.block == TITLE { CtxKind::Title } else { CtxKind::Caret };
         self.menu = Some(Menu::Ctx { pos: self.rel(ev.position), kind, sub: None });
         cx.notify();
+    }
+
+    /// Touch: a long press selects the word under it (as a double click does)
+    /// and moving the finger extends the selection.
+    pub(super) fn on_long_press(&mut self, ev: &LongPressEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match ev.phase {
+            TouchPhase::Started => {
+                let Some((pos, _)) = self.pos_at(ev.position) else { return };
+                let text = self.core.text_of(pos.block).map(|t| t.text.clone()).unwrap_or_default();
+                if text.is_empty() { return; }
+                window.focus(&self.focus, cx);
+                self.core.clear_block_sel();
+                self.goal_x = None;
+                self.slash = None;
+                self.marked = None;
+                let r = core::word_at(&text, pos.offset);
+                self.set_caret(Pos::new(pos.block, r.start), false);
+                self.core.sel.head = Pos::new(pos.block, r.end);
+                self.toolbar_hidden = false;
+                self.long_press = true;
+                window.prevent_default();
+                cx.stop_propagation();
+                self.restart_blink(window, cx);
+                cx.notify();
+            }
+            TouchPhase::Moved if self.long_press => self.drag_to(ev.position, cx),
+            TouchPhase::Ended | TouchPhase::Cancelled => self.long_press = false,
+            _ => {}
+        }
     }
 
     pub fn drag_to(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
