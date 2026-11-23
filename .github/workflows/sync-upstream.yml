@@ -61,6 +61,10 @@ jobs:
             exit 0
           fi
 
+          # Remember where main was before the merge: the workflow guard below
+          # needs our own copy of .github/workflows/, not the merged one.
+          echo "before=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
           # --no-edit keeps the default merge message; a conflict fails the job
           # loudly instead of leaving a half-merged tree behind.
           if ! git merge --no-edit "$upstream_sha"; then
@@ -73,6 +77,29 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "updated=true" >> "$GITHUB_OUTPUT"
           git log --oneline -3
+
+      # GITHUB_TOKEN is a GitHub App token and cannot create or update files
+      # under .github/workflows/ without the `workflows` permission, so a merge
+      # that brings in an upstream CI change is rejected at push time:
+      #
+      #   refusing to allow a GitHub App to create or update workflow
+      #   `.github/workflows/ci.yml` without `workflows` permission
+      #
+      # This fork ships its own build workflows and does not need upstream's, so
+      # the workflow directory is restored to our version before pushing. The
+      # upstream sources still merge normally.
+      - name: Keep this fork's workflows
+        if: steps.merge.outputs.updated == 'true'
+        run: |
+          set -euo pipefail
+          before=${{ steps.merge.outputs.before }}
+          git checkout "$before" -- .github/workflows/
+          if git diff --cached --quiet; then
+            echo "No upstream workflow changes to drop."
+          else
+            git commit -m "ci: keep this fork's workflows (upstream CI is not used here)"
+            echo "Upstream workflow changes were dropped."
+          fi
 
       - name: Push the merge
         if: steps.merge.outputs.updated == 'true'
