@@ -21,11 +21,12 @@ mod guides;
 mod clipboard;
 #[cfg(feature = "devtools")]
 mod devtools;
-/// Without the `devtools` feature (release builds) nothing reads FDL_SCRIPT.
+/// Without the `devtools` feature (release builds) nothing reads FDL_SCRIPT;
+/// only the built-in release self-test (`selftest.rs`) runs unattended.
 #[cfg(not(feature = "devtools"))]
 mod devtools {
     pub static RENDER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    pub fn scripted() -> bool { false }
+    pub fn scripted() -> bool { crate::selftest::active() }
     pub fn start(_: &mut gpui::Window, _: &mut gpui::App) {}
     pub fn take_pick() -> Option<Vec<std::path::PathBuf>> { None }
     pub fn file_drag() -> bool { false }
@@ -46,12 +47,19 @@ mod native_header;
 #[cfg(not(target_os = "macos"))]
 #[path = "native_header_fallback.rs"]
 mod native_header;
+mod mermaid;
 mod printing;
 mod search;
+#[cfg(not(target_family = "wasm"))]
+mod selftest;
+#[cfg(target_family = "wasm")]
+mod selftest {
+    pub fn active() -> bool { false }
+    pub fn start(_: &mut gpui::Window, _: &mut gpui::App) {}
+}
 mod sidebar;
 mod local_files;
 mod local_folders;
-mod system_trash;
 mod sidebar_drag;
 mod sidebar_drop;
 mod home_folder;
@@ -148,6 +156,7 @@ pub(crate) fn open_main_window(scripted: bool, at: Option<Bounds<Pixels>>, cx: &
     let options = main_window_options(scripted, at, cx);
     cx.open_window(options, |window, cx| {
         devtools::start(window, cx);
+        selftest::start(window, cx);
         cx.new(|cx| app::Workspace::new(window, cx))
     })
     .expect("open window");
@@ -160,11 +169,13 @@ pub(crate) fn open_main_window(scripted: bool, at: Option<Bounds<Pixels>>, cx: &
 pub(crate) fn start(existed: bool, scripted: bool, into: Option<&mut Window>, incoming: local_files::Incoming, cx: &mut App) -> Option<Entity<app::Workspace>> {
     changelog::startup(existed);
     shortcuts::init(cx);
-    match shared_store::SharedStore::open() {
-        Ok(s) => cx.set_global(s),
-        Err(err) => logging::fatal("无法打开文档库 / Could not open the library", &err),
-    }
-    if let Some(r) = cx.global::<shared_store::SharedStore>().with(|s| s.migrated.take()) { changelog::migrated(&r); }
+    // No root is fatal: one that can't be opened shows as such in the sidebar.
+    if !cx.has_global::<shared_store::SharedStore>() { cx.set_global(shared_store::SharedStore::open()); }
+    let mut moved = vec![];
+    cx.global::<shared_store::SharedStore>().each(|s| moved.extend(s.migrated.take()));
+    for r in moved { changelog::migrated(&r); }
+    // The root in front brings its own look (W21).
+    settings::root_switched(cx);
     // The web build has no global shortcut to register.
     if !scripted && !cfg!(target_family = "wasm") { quick_note::install(cx); }
     app::set_menus(cx);
@@ -213,6 +224,8 @@ fn main() { web::main() }
 
 #[cfg(not(target_family = "wasm"))]
 fn main() {
+    // `--self-test`: runs the built-in release checks in launches of its own.
+    if let Some(code) = selftest::command() { std::process::exit(code) }
     logging::init();
     let scripted = devtools::scripted();
     // No single-instance guard: copies may share a library (builds tested
@@ -221,13 +234,18 @@ fn main() {
     // The store asks the system whether a library is in iCloud through this.
     #[cfg(target_os = "macos")]
     store::set_ubiquity_probe(onboarding::ubiquitous);
-    let root = store::Store::root_dir();
+    let root = store::Store::legacy_root();
+    let fixed = std::env::var_os("QUIET_MD_HOME").is_some();
     logging::write(&format!("library {}", root.display()));
-    // A library that was here before this launch can show 更新日志.
-    let existed = guides::seeded(&root).unwrap_or(false);
-    // A new library is set up after first launch's pages pick where it goes.
+    // 工作区: a roots.json (even an empty one: every folder removed) or the
+    // library builds before it used means this computer has been here
+    // before, and can show 更新日志.
+    let existed = (!fixed && fdl_core::vfs::PathExt::fs_exists(fdl_core::workspace::Workspace::roots_file().as_path())) || guides::seeded(&root).unwrap_or(false);
+    // A first launch picks its folders on the first launch's pages.
     let onboard = onboarding::wanted(existed, scripted);
-    if !scripted && !onboard && let Err(err) = guides::initialize(&root) {
+    // A test run's folder (`QUIET_MD_HOME`) is set up as before; the
+    // self-test checks first launch's seeding, without its pages.
+    if fixed && (!scripted || selftest::active()) && !onboard && let Err(err) = guides::initialize(&root) {
         logging::fatal(&format!("无法初始化文档库 / Could not set up the library at {}", root.display()), &err);
     }
     let app = gpui_platform::application().with_assets(assets::Assets);
