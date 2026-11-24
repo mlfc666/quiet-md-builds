@@ -7,10 +7,9 @@
 //! mtime}`. `mtime` is the wall-clock unix seconds at record time (not the
 //! file's own mtime).
 //!
-//! The hash is the git blob SHA-1, `sha1("blob <len>\0" + bytes)`, not the
-//! sha256 sync.md 3.1 names: a file then has the same hash as its blob sha in
-//! a GitHub tree, so the GitHub backend can tell whether a file changed
-//! without downloading it.
+//! The hash is the git blob SHA-1, `sha1("blob <len>\0" + bytes)` (sync.md
+//! 3.1): a file then has the same hash as its blob sha in a GitHub tree, so
+//! the GitHub backend can tell whether a file changed without downloading it.
 //!
 //! Paths are NFC, and compare case-insensitively (sync.md 1.7) while the entry
 //! keeps the case it was last recorded with.

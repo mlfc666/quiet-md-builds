@@ -154,10 +154,10 @@ pub struct Preferences {
     pub recent_doc_fonts: Vec<String>,
     #[serde(default)]
     pub recent_ui_fonts: Vec<String>,
-    /// 文档库 › 快速笔记保存到: the 工作区 root key quick notes go to; empty,
-    /// or a root that is gone, is the first open root (2.8).
-    #[serde(default)]
-    pub quick_note_root: String,
+    /// 文档库 › 快速笔记保存到: the folder key quick notes go to; empty,
+    /// or a top-level folder that is gone, is the first open top-level folder (2.8).
+    #[serde(default, alias = "quick_note_root")]
+    pub quick_note_folder: String,
 }
 
 /// A week between asks to move the library to real folders.
@@ -196,7 +196,7 @@ fn system_lang() -> Lang {
 impl Default for Preferences {
     fn default() -> Self {
         let lang = system_lang();
-        Preferences { theme: String::new(), feishu: true, english: lang != Lang::Zh, language: lang.code().into(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), new_default: String::new(), last_new: String::new(), search_engine: String::new(), start_home: false, browser: String::new(), opaque_window: false, ui_font: String::new(), ui_family: String::new(), doc_family: String::new(), doc_size: String::new(), migrate_later: 0, find_regex: false, backspace_to_title: true, cjk_spacing: false, font_favorites: vec![], recent_doc_fonts: vec![], recent_ui_fonts: vec![], quick_note_root: String::new() }
+        Preferences { theme: String::new(), feishu: true, english: lang != Lang::Zh, language: lang.code().into(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), new_default: String::new(), last_new: String::new(), search_engine: String::new(), start_home: false, browser: String::new(), opaque_window: false, ui_font: String::new(), ui_family: String::new(), doc_family: String::new(), doc_size: String::new(), migrate_later: 0, find_regex: false, backspace_to_title: true, cjk_spacing: false, font_favorites: vec![], recent_doc_fonts: vec![], recent_ui_fonts: vec![], quick_note_folder: String::new() }
     }
 }
 
@@ -224,11 +224,11 @@ pub(crate) fn show_lang(lang: Lang) {
 }
 
 /// The preferences: this computer's (应用级), the document theme, font and
-/// 正文字号 the root in front's own (W21: they go with its folder).
+/// 正文字号 the top-level folder in front's own (W21: they go with its folder).
 pub fn load() {
     let mut p = fdl_core::vfs::read(path()).ok().and_then(|b| serde_json::from_slice::<Preferences>(&b).ok()).unwrap_or_default();
-    if let Some(root) = look_root() {
-        let look = crate::store::Store::root_look_at(&root);
+    if let Some(root) = look_dir() {
+        let look = crate::store::Store::look_at(&root);
         let d = Preferences::default();
         p.theme = look.theme.unwrap_or(d.theme);
         p.feishu = look.feishu.unwrap_or(d.feishu);
@@ -238,21 +238,21 @@ pub fn load() {
     apply(p);
 }
 
-/// The root whose look is in use: the one in front, when a root is open.
-fn look_root() -> Option<std::path::PathBuf> {
-    let root = crate::store::Store::root_dir();
-    (cx_has_roots() && root.join(crate::store::INTERNAL).exists()).then_some(root)
+/// The top-level folder whose look is in use: the one in front, when a top-level folder is open.
+fn look_dir() -> Option<std::path::PathBuf> {
+    let root = crate::store::Store::active_dir();
+    (has_folders() && root.join(crate::store::INTERNAL).exists()).then_some(root)
 }
 
-/// Whether the 工作区 has a root (none before first launch picks one).
-fn cx_has_roots() -> bool { HAS_ROOTS.load(Ordering::Relaxed) }
-static HAS_ROOTS: AtomicBool = AtomicBool::new(false);
-pub(crate) fn set_has_roots(on: bool) { HAS_ROOTS.store(on, Ordering::Relaxed); }
+/// Whether 主页 has a folder (none before first launch picks one).
+fn has_folders() -> bool { HAS_FOLDERS.load(Ordering::Relaxed) }
+static HAS_FOLDERS: AtomicBool = AtomicBool::new(false);
+pub(crate) fn set_has_folders(on: bool) { HAS_FOLDERS.store(on, Ordering::Relaxed); }
 
-/// Another root came to the front: its own look (theme, document font,
-/// themes folder) takes over in every window. Changing look between roots is
+/// Another top-level folder came to the front: its own look (theme, document font,
+/// themes folder) takes over in every window. Changing look between top-level folders is
 /// meant (W21).
-pub(crate) fn root_switched(cx: &mut App) {
+pub(crate) fn top_switched(cx: &mut App) {
     let before = prefs();
     load();
     let now = prefs();
@@ -283,8 +283,10 @@ fn apply(p: Preferences) {
 /// families once so one that has been uninstalled since falls back to the
 /// default face (`fonts::store`) instead of GPUI's last resort, and note which
 /// punctuation it draws itself (`fonts::probe`). Without one, fonts stay
-/// unenumerated.
+/// unenumerated; only whether the Chinese punctuation face is here is
+/// looked up (`fonts::check_cjk_punct`).
 pub fn check_fonts(cx: &App) {
+    crate::fonts::check_cjk_punct(cx);
     let p = prefs();
     if p.ui_family.trim().is_empty() && p.doc_family.trim().is_empty() { return }
     crate::fonts::families(cx);
@@ -396,10 +398,10 @@ pub(crate) fn save(p: &Preferences) -> anyhow::Result<()> {
     f.write_all(&serde_json::to_vec_pretty(p)?)?;
     f.sync_all()?;
     fdl_core::vfs::rename(tmp, path())?;
-    // The document theme, font and 正文字号 are the root in front's (W21).
-    if let Some(root) = look_root() {
-        let look = crate::store::RootLook { theme: Some(p.theme.clone()), feishu: Some(p.feishu), doc_family: Some(p.doc_family.clone()), doc_size: Some(p.doc_size.clone()) };
-        if crate::store::Store::root_look_at(&root) != look { crate::store::Store::save_root_look_at(&root, &look)?; }
+    // The document theme, font and 正文字号 are the top-level folder in front's (W21).
+    if let Some(root) = look_dir() {
+        let look = crate::store::FolderLook { theme: Some(p.theme.clone()), feishu: Some(p.feishu), doc_family: Some(p.doc_family.clone()), doc_size: Some(p.doc_size.clone()) };
+        if crate::store::Store::look_at(&root) != look { crate::store::Store::save_look_at(&root, &look)?; }
     }
     apply(p.clone());
     Ok(())
@@ -740,15 +742,16 @@ fn font_row(family: &str, dl: Option<&'static str>, flat: bool, g: SharedString,
         else { div().text_color(crate::design::color::disabled()).child(tr("下载后可预览", "Preview after download")) };
     let (del, star) = (dl.map(str::to_string), family.to_string());
     let hover_key = key.clone();
-    div().w_full().flex().flex_col().child(MenuItem::new(g.clone()).selected(focused)
+    div().w_full().flex().flex_col().relative().children(crate::devtools::row_probe(label.clone())).child(MenuItem::new(g.clone()).selected(focused)
         .on_hover(cx.listener(move |w, hovered: &bool, _, cx| if *hovered { w.preview_font(hover_key.clone(), row, cx) }))
         .on_click(cx.listener(move |w, _, window, cx| w.pick_font(key.clone(), target, window, cx)))
         .child(div().flex_none().w(px(150.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui::ui_text(label)))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_size(px(theme::ui_font())).child(sample))
         .children(tags.into_iter().map(tag))
         .child(status)
-        .when(e.is_some_and(|e| fd::on_disk(&e.id) && !fd::pending(&e.id)), |d| d.child(Button::ghost(SharedString::from(format!("font-del-{}", del.clone().unwrap_or_default()))).sized(ButtonSize::Xs).icon("bin")
-            .on_click(cx.listener(move |w, _, _, cx| { cx.stop_propagation(); if let Some(id) = &del { w.delete_download(id, cx) } }))))
+        .when(e.is_some_and(|e| fd::on_disk(&e.id) && !fd::pending(&e.id)), |d| d.child(div().relative().children(crate::devtools::anchor_probe(format!("font-del-{}", del.clone().unwrap_or_default())))
+            .child(Button::ghost(SharedString::from(format!("font-del-{}", del.clone().unwrap_or_default()))).sized(ButtonSize::Xs).icon("bin")
+            .on_click(cx.listener(move |w, _, _, cx| { cx.stop_propagation(); if let Some(id) = &del { w.delete_download(id, cx) } })))))
         .child(Button::ghost(SharedString::from(format!("{g}-star"))).sized(ButtonSize::Xs)
             .child(crate::design::icon("star", 14., if fav { crate::design::color::primary() } else { crate::design::color::disabled() }))
             .on_click(cx.listener(move |w, _, _, cx| { cx.stop_propagation(); w.toggle_favorite(&star, cx) }))))
@@ -1386,12 +1389,14 @@ impl Workspace {
     }
 
     pub(crate) fn render_settings_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        crate::devtools::rows_begin(window);
         let current = (self.view == View::Settings).then_some(self.settings_page);
         let in_trash = self.view == View::Trash;
         let nav_row = |page: Option<Page>, cx: &mut Context<Self>| {
             let on = if page.is_some() { page == current } else { in_trash };
             let (title, icon) = page.map_or((tr("回收站", "Trash"), "bin"), |p| (p.title(), p.icon()));
             div().id(SharedString::from(format!("settings-nav-{page:?}"))).h(px(sb::ROW_H)).flex().items_center().pl(px(6.)).pr(px(4.)).rounded(px(sb::ROW_R))
+                .relative().children(crate::devtools::row_probe(title))
                 .text_size(px(theme::ui_font())).line_height(px(theme::ui_font() + 7.)).cursor_pointer()
                 .when(on, |d| d.bg(Theme::sidebar_selected()).text_color(Theme::text()))
                 .when(!on, |d| d.text_color(Theme::sidebar_text()).hover(|s| s.bg(Theme::sidebar_hover())))
@@ -1403,7 +1408,7 @@ impl Workspace {
             .child(div().h(px(crate::app::HEADER_H)).flex_none().flex().items_center().pl(px(theme::TRAFFIC_LIGHTS_W)).pr(px(12.)).title_bar().child(self.header_navigation(cx))
                 .child(div().flex_1()).children(update_pill(cx)))
             // The document sidebar's rhythm: 主页 sits 8 under the bar, a section
-            // header like 我的文档's, rows on a 31 pitch. 设置's line sits on
+            // header like 我的文档's, rows `ROW_GAP` apart. 设置's line sits on
             // 主页's, not a section header's: the 34pt box keeps the rows below.
             .child(div().pt(px(8.)).px(px(sb::SB_X)).flex().flex_col()
                 .child(div().h(px(sb::SECTION_H)).pl(px(4.)).pt(px((sb::SECTION_TOP + sb::SECTION_H) / 2. - sb::ROW_H / 2.))
@@ -1416,7 +1421,7 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// 收起 / 展开侧栏 and 主页, in the very box the document sidebar's
+    /// 收起 / 展开侧栏 and 返回, in the very box the document sidebar's
     /// 收起侧栏 uses (28pt, 4pt past the traffic lights, glyph 17), so the
     /// buttons don't move when switching between the document list and 设置.
     pub(crate) fn header_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1426,14 +1431,20 @@ impl Workspace {
             .child(bar_button("settings-collapse", if open { "panel-left-close" } else { "panel-left-open" })
                 .tip(if open { tr("收起侧栏", "Hide sidebar") } else { tr("展开侧栏", "Show sidebar") }, Some(crate::shortcuts::hint("workspace::ToggleSidebar", "⌘ + ]")))
                 .on_click(cx.listener(|w, _, _, cx| { w.sidebar_open = !w.sidebar_open; cx.notify(); })))
-            .child(bar_button("settings-home", "home").tip(tr("返回主页", "Home"), Some(crate::shortcuts::hint("workspace::GoHome", "⌘ + ⌥ + Home")))
-                .on_click(cx.listener(|w, _, _, cx| w.show_view(View::Home, cx))))
+            // 返回, where navigation goes back (HIG): to the page 设置 was opened from, as the footer's 返回 does.
+            .child(bar_button("settings-back", "arrow-left").tip(tr("返回", "Back"), Some("Esc"))
+                .on_click(cx.listener(|w, _, _, cx| w.close_settings(cx))))
             .into_any_element()
     }
 
-    /// Back to where 设置 was opened from.
+    /// Back to where 设置 was opened from: the document, a folder's page or
+    /// 主页 (主页 when what it was is gone).
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
-        let back = if self.editor.is_some() && self.current.is_some() { View::Doc } else { View::Home };
+        let back = match self.settings_from {
+            View::Doc if self.editor.is_some() && self.current.is_some() => View::Doc,
+            View::Folder if self.folder_current.is_some() => View::Folder,
+            _ => View::Home,
+        };
         self.show_view(back, cx);
     }
 
@@ -1538,6 +1549,7 @@ impl Workspace {
             let open = self.font_menu.as_ref().is_some_and(|m| m.target == target);
             popup_button(format!("{}-font-picker", target.key()), label, open)
                 .child(canvas(move |b, _, _| { anchors.borrow_mut().insert(key, b); }, |_, _, _, _| {}).absolute().inset_0())
+                .children(crate::devtools::anchor_probe(format!("{}-font-picker", target.key())))
                 .relative()
                 .on_click(cx.listener(move |w, _, window, cx| w.toggle_font_menu(target, window, cx)))
         })
@@ -1555,7 +1567,7 @@ impl Workspace {
         let errors = themes::errors();
         let where_: SharedString = match &sel_path {
             // Inside the library: the short path (the full one wraps on narrow windows).
-            Some(p) => p.strip_prefix(crate::store::Store::root_dir()).unwrap_or(p).display().to_string().into(),
+            Some(p) => p.strip_prefix(crate::store::Store::active_dir()).unwrap_or(p).display().to_string().into(),
             None => tr("内置主题", "Built in").into(),
         };
         let (edit_id, dup_id, rm_id, open_id) = (sel_id.clone(), sel_id.clone(), sel_id.clone(), sel_id);
@@ -1649,26 +1661,26 @@ impl Workspace {
         let short = |root: &std::path::Path| if cfg!(target_os = "windows") { root.display().to_string() } else {
             dirs::home_dir().and_then(|h| root.strip_prefix(h).ok().map(|r| format!("~/{}", r.display()))).unwrap_or_else(|| root.display().to_string())
         };
-        // 工作区: every root folder alike, each with its own 回收站 and history.
-        let mut folders: Vec<AnyElement> = self.store.roots().into_iter().map(|(key, name, path, error)| {
+        // 主页: every top-level folder alike, each with its own 回收站 and history.
+        let mut folders: Vec<AnyElement> = self.store.top_folders().into_iter().map(|(key, name, path, error)| {
             let (k, n, p) = (key.clone(), name.clone(), path.clone());
             let sub: SharedString = match error { Some(e) => format!("{} · {}", short(&path), diagnostic(&e)).into(), None => short(&path).into() };
             row(name, Some(sub), div().flex_none().flex().gap(px(8.))
                 .child(button(SharedString::from(format!("reveal-{key}")), reveal).on_click(move |_, _, cx| cx.reveal_path(&p)))
-                // A test run's one root (`QUIET_MD_HOME`) is fixed.
-                .when(std::env::var_os("QUIET_MD_HOME").is_none() || std::env::var_os("QUIET_MD_ROOTS").is_some(), |d| d.child(button(SharedString::from(format!("remove-{key}")), tr("移除", "Remove")).on_click(cx.listener(move |w, _, _, cx| { w.confirm = Some(crate::app::Confirm::RemoveRoot(k.clone(), n.clone())); cx.notify(); }))))).into_any_element()
+                // A test run's one top-level folder (`QUIET_MD_HOME`) is fixed.
+                .when(std::env::var_os("QUIET_MD_HOME").is_none() || std::env::var_os("QUIET_MD_FOLDERS").is_some(), |d| d.child(button(SharedString::from(format!("remove-{key}")), tr("移除", "Remove")).on_click(cx.listener(move |w, _, _, cx| { w.confirm = Some(crate::app::Confirm::RemoveFolder(k.clone(), n.clone())); cx.notify(); }))))).into_any_element()
         }).collect();
         // 快速笔记保存到 (2.8): a choice once there is one to make.
-        let open: Vec<(String, String)> = self.store.roots().into_iter().filter(|r| r.3.is_none()).map(|r| (r.0, r.1)).collect();
+        let open: Vec<(String, String)> = self.store.top_folders().into_iter().filter(|r| r.3.is_none()).map(|r| (r.0, r.1)).collect();
         if open.len() > 1 {
-            let at = self.store.quick_note_root().and_then(|k| open.iter().position(|r| r.0 == k)).unwrap_or(0);
+            let at = self.store.quick_note_folder().and_then(|k| open.iter().position(|r| r.0 == k)).unwrap_or(0);
             let keys: Vec<String> = open.iter().map(|r| r.0.clone()).collect();
             folders.push(row(tr("快速笔记保存到", "Quick notes go to"), desc(tr("「新建笔记窗口」和全局快捷键记下的笔记放在这个文件夹里。", "Notes from New Note Window and the global shortcut are saved in this folder.")),
-                self.select("quick-note-root", open.into_iter().map(|r| r.1).collect(), at, move |w, i, cx| { let k = keys[i].clone(); w.set_pref(|p| p.quick_note_root = k, cx) }, cx)).into_any_element());
+                self.select("quick-note-folder", open.into_iter().map(|r| r.1).collect(), at, move |w, i, cx| { let k = keys[i].clone(); w.set_pref(|p| p.quick_note_folder = k, cx) }, cx)).into_any_element());
         }
         folders.push(row(tr("添加文件夹", "Add a folder"), Some(tr("打开电脑上已有的文件夹，或新建一个，都会显示在侧栏里。", "Open a folder already on your computer, or make a new one; either shows in the sidebar.").into()), div().flex_none().flex().gap(px(8.))
-            .child(button("open-root", tr("打开…", "Open…")).on_click(cx.listener(|w, _, window, cx| w.open_folder_dialog(window, cx))))
-            .child(button("new-root", tr("新建…", "New…")).on_click(cx.listener(|w, _, window, cx| w.new_root_dialog(window, cx))))).into_any_element());
+            .child(button("open-folder", tr("打开…", "Open…")).on_click(cx.listener(|w, _, window, cx| w.open_folder_dialog(window, cx))))
+            .child(button("new-folder", tr("新建…", "New…")).on_click(cx.listener(|w, _, window, cx| w.new_folder_dialog(window, cx))))).into_any_element());
         div().w_full().flex().flex_col().gap(px(8.))
             .child(group("group-folders", Some(tr("文件夹", "Folders")), folders))
             .child(group("group-library", None, vec![
@@ -1677,7 +1689,7 @@ impl Workspace {
                 // #237: files no document (the Trash included) mentions.
                 row(tr("未使用资源", "Unused assets"), Some(tr("资源文件夹里没有任何文档（含回收站、版本历史和本机文件）引用的图片和文件。检查后确认才会移出。", "Images and files in the asset folder that no document mentions, including the Trash, version history and local files. Nothing is moved until you confirm.").into()),
                     button("sweep-assets", tr("检查", "Check")).on_click(cx.listener(|w, _, window, cx| {
-                        let root = crate::store::Store::root_dir();
+                        let root = crate::store::Store::active_dir();
                         let (live, outside) = w.sweep_inputs(window, cx);
                         cx.spawn(async move |this, cx| {
                             let sweep = cx.background_executor().spawn(async move { crate::store::Store::unused_assets_at(root, live, outside) }).await;
@@ -1735,11 +1747,11 @@ pub(crate) fn update_pill(cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let busy = matches!(state, State::Downloading(_) | State::Installing(_));
     Some(div().id("update-pill").no_drag().flex_shrink_1().min_w_0().h(px(24.)).px(px(10.)).relative().overflow_hidden().flex().items_center().justify_center().rounded_full()
         .text_size(px(theme::ui_font_small())).line_height(px(theme::ui_font_small() + 4.)).font_weight(FontWeight::MEDIUM)
-        .when(!busy, |d| d.cursor_pointer().bg(Theme::primary()).text_color(gpui::white()).hover(|s| s.opacity(0.9)))
+        .when(!busy, |d| d.cursor_pointer().bg(crate::design::color::primary()).text_color(crate::design::color::primary_foreground()).hover(|s| s.opacity(0.9)))
         .when(busy, |d| d.bg(Theme::sidebar_hover()).text_color(Theme::text_caption()))
         // Downloading: a fixed width (no jitter as the digits change), filled left
         // to right behind a moving wave.
-        .when_some(fill, |d, f| d.w(px(56.)).child(ui::wave_fill(f, Theme::primary().opacity(0.18))))
+        .when_some(fill, |d, f| d.w(px(56.)).child(ui::wave_fill(f, crate::design::color::primary().opacity(0.18))))
         .child(div().relative().min_w_0().truncate().child(label))
         .tip(&tip, None)
         .on_click(move |_, _, cx| match &state { State::Available(_) => crate::update::download(cx), State::Ready(..) => crate::update::install(cx), _ => {} })
@@ -1992,8 +2004,6 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "秒" => "s",
         "无效公式" => "Invalid equation",
         "目录下暂无子页面" => "No child pages yet",
-        "创建时间（最新优先）" => "Created (newest first)",
-        "标题（升序）" => "Title (A–Z)",
         "切换为宫格视图" => "Switch to grid view",
         "切换为列表视图" => "Switch to list view",
         "当前列表暂无内容" => "Nothing here yet",

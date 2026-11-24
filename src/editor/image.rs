@@ -2250,15 +2250,17 @@ fn download(url: &str, dest: &Path) -> bool {
         let _ = fdl_core::vfs::create_dir_all(d);
     }
     let tmp = dest.with_extension("part");
-    let fetched = std::process::Command::new("curl")
-        .args(["-fsSL", "--max-time", "60", "-o"])
+    let mut curl = std::process::Command::new("curl");
+    curl.args(["-fsSL", "--max-time", "60", "-o"])
         .arg(&tmp)
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+        .stderr(std::process::Stdio::null());
+    // No console window flashing up on Windows (#415).
+    #[cfg(target_os = "windows")]
+    { use std::os::windows::process::CommandExt; curl.creation_flags(0x0800_0000); }
+    let fetched = curl.status().is_ok_and(|s| s.success());
     let ok = fetched
         && image::ImageReader::open(&tmp).ok().and_then(|r| r.with_guessed_format().ok()).and_then(|r| r.into_dimensions().ok()).is_some()
         && fdl_core::vfs::rename(&tmp, dest).is_ok();
@@ -2293,7 +2295,7 @@ fn decode_rotated(path: &Path, crop: [f32; 4], rot: u8) -> Option<Arc<RenderImag
 
 /// A new image block for pasted or picked bytes, stored in the assets
 /// folder (format, size and pixel checks on upload).
-pub(super) fn image_block_from(bytes: &[u8], ext: &str) -> Result<Block, &'static str> { image_block_named(bytes, ext, None) }
+pub(super) fn image_block_from(bytes: &[u8], ext: &str) -> Result<Block, &'static str> { image_block_named(&Store::assets_dir(), bytes, ext, None) }
 
 /// macOS screenshots may only offer TIFF. Store those as lossless PNG;
 /// other clipboard formats keep their original bytes (including animation).
@@ -2318,8 +2320,9 @@ pub(crate) fn clipboard_image_data(img: &gpui::Image) -> Result<(std::borrow::Co
 }
 
 /// `image_block_from` for a file that has a name of its own, which its copy keeps.
-fn image_block_named(bytes: &[u8], ext: &str, name: Option<&str>) -> Result<Block, &'static str> {
-    let path = store_image_named(bytes, ext, name)?;
+/// The picture copied into `assets`, as an image block.
+fn image_block_named(assets: &Path, bytes: &[u8], ext: &str, name: Option<&str>) -> Result<Block, &'static str> {
+    let path = store_image_in(assets, bytes, ext, name)?;
     let mut b = Block::new(
         BlockKind::Image { src_kind: "src".into(), src: path.to_string_lossy().to_string(), width: None, height: None, caption: None, crop: None },
         RichText::default(),
@@ -2334,7 +2337,10 @@ pub(crate) fn store_image(bytes: &[u8], ext: &str) -> Result<PathBuf, &'static s
 /// `store_image`; an image with a `name` (a picked or dropped file) is kept
 /// as `<8 hex>-<name>.<ext>`, so its name survives in the library and in the
 /// copy beside a Markdown file. A pasted one is just `<uuid>.<ext>`.
-pub(crate) fn store_image_named(bytes: &[u8], ext: &str, name: Option<&str>) -> Result<PathBuf, &'static str> {
+pub(crate) fn store_image_named(bytes: &[u8], ext: &str, name: Option<&str>) -> Result<PathBuf, &'static str> { store_image_in(&Store::assets_dir(), bytes, ext, name) }
+
+/// `store_image_named` into `assets`: an import names the library it writes to, never the one in front.
+fn store_image_in(assets: &Path, bytes: &[u8], ext: &str, name: Option<&str>) -> Result<PathBuf, &'static str> {
     let ext = ext.to_ascii_lowercase();
     if !FORMATS.contains(&ext.as_str()) {
         return Err(BAD_FORMAT);
@@ -2351,12 +2357,16 @@ pub(crate) fn store_image_named(bytes: &[u8], ext: &str, name: Option<&str>) -> 
     let name: Option<String> = name.map(|n| n.chars().map(|c| if matches!(c, '/' | '\\' | ':') || c.is_control() { '_' } else { c }).take(80).collect::<String>())
         .map(|n| n.trim().trim_start_matches('.').to_string()).filter(|n| !n.is_empty());
     let file = match name { Some(n) => format!("{}-{n}.{ext}", &id[..8]), None => format!("{id}.{ext}") };
-    let path = Store::assets_dir().join(file);
+    let _ = fdl_core::vfs::create_dir_all(assets);
+    let path = assets.join(file);
     fdl_core::vfs::write(&path, bytes).map_err(|_| BAD_DIMS)?;
     Ok(path)
 }
 
-pub(crate) fn image_block_from_file(p: &Path) -> Result<Block, &'static str> {
+pub(crate) fn image_block_from_file(p: &Path) -> Result<Block, &'static str> { image_block_from_file_in(&Store::assets_dir(), p) }
+
+/// `image_block_from_file`, copied into `assets`.
+pub(crate) fn image_block_from_file_in(assets: &Path, p: &Path) -> Result<Block, &'static str> {
     let ext = p.extension().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
     if !p.fs_is_file() || !FORMATS.contains(&ext.as_str()) {
         return Err(BAD_FORMAT);
@@ -2365,7 +2375,10 @@ pub(crate) fn image_block_from_file(p: &Path) -> Result<Block, &'static str> {
         return Err(TOO_BIG);
     }
     let bytes = fdl_core::vfs::read(p).map_err(|_| BAD_DIMS)?;
-    image_block_named(&bytes, &ext, p.file_stem().and_then(|s| s.to_str()))
+    let b = image_block_named(assets, &bytes, &ext, p.file_stem().and_then(|s| s.to_str()))?;
+    // The copy in the assets keeps the picture's change time, as a copy in the Finder does.
+    if let (BlockKind::Image { src, .. }, Some((_, changed))) = (&b.kind, fdl_core::vfs::file_times(p)) { let _ = fdl_core::vfs::set_modified(Path::new(src), changed); }
+    Ok(b)
 }
 
 /// One line of pasted text that is nothing but a local image file path
@@ -2401,13 +2414,16 @@ pub fn cached_remote(url: &str) -> Option<PathBuf> {
 
 /// Pasted HTML images: `data:` URIs and local files become owned assets;
 /// unreadable ones are dropped. Remote images stay remote.
-pub(crate) fn localize_pasted_images(blocks: &mut Vec<Block>) {
+pub(crate) fn localize_pasted_images(blocks: &mut Vec<Block>) { localize_images_in(&Store::assets_dir(), blocks) }
+
+/// `localize_pasted_images` into `assets` (an import's library's).
+pub(crate) fn localize_images_in(assets: &Path, blocks: &mut Vec<Block>) {
     use base64::Engine;
     blocks.retain_mut(|b| {
-        localize_pasted_images(&mut b.children);
+        localize_images_in(assets, &mut b.children);
         if let BlockKind::Table(t) = &mut b.kind {
             for cell in t.rows.iter_mut().flatten() {
-                localize_pasted_images(&mut cell.blocks);
+                localize_images_in(assets, &mut cell.blocks);
                 if cell.blocks.is_empty() && !cell.is_covered() {
                     cell.blocks.push(Block::text(""));
                 }
@@ -2418,15 +2434,21 @@ pub(crate) fn localize_pasted_images(blocks: &mut Vec<Block>) {
             let Some((head, payload)) = data.split_once(',') else { return false };
             let ext = head.split(';').next().unwrap_or_default().replace("jpeg", "jpg");
             let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload.trim()) else { return false };
-            image_block_from(&bytes, &ext)
+            image_block_named(assets, &bytes, &ext, None)
         } else if src.starts_with('/') {
-            image_block_from_file(Path::new(src.as_str()))
+            image_block_from_file_in(assets, Path::new(src.as_str()))
         } else {
             return true;
         };
+        // The copy keeps the width and caption the page gave the picture (`<img width>`, `![[a.png|300]]`).
+        let (old_width, old_caption) = match &b.kind { BlockKind::Image { width, caption, .. } => (*width, caption.clone()), _ => (None, None) };
         match local {
             Ok(n) => {
                 b.kind = n.kind;
+                if let BlockKind::Image { width, height, caption, .. } = &mut b.kind {
+                    if old_width.is_some() { (*width, *height) = (old_width, None); }
+                    if old_caption.is_some() { *caption = old_caption; }
+                }
                 true
             }
             Err(_) => false,

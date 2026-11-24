@@ -240,8 +240,9 @@ impl RenderOnce for MenuItem {
         let fill = if danger { color::destructive_soft() } else { color::accent() };
         let two_lines = self.description.is_some();
         let MenuItem { base, icon: ic, editor_icon, leading, label: lab, description, extra, shortcut, checked, submenu, inset, .. } = self;
+        let probe = lab.clone().and_then(crate::devtools::row_probe);
         under(base, |d| {
-            d.flex_none().when(!two_lines, |d| d.h(px(g.menu_row_h))).when(two_lines, |d| d.min_h(px(g.menu_row_h)).py(px(6.)))
+            d.relative().children(probe).flex_none().when(!two_lines, |d| d.h(px(g.menu_row_h))).when(two_lines, |d| d.min_h(px(g.menu_row_h)).py(px(6.)))
                 .mx(px(g.menu_pad)).px(px(g.menu_row_px)).flex().items_center().gap(px(g.menu_gap)).rounded(px(g.menu_row_r))
                 .text_size(px(g.text)).line_height(px(super::text::SM_LINE)).text_color(fg)
                 .when(off, |d| d.opacity(0.5)).when(!off, |d| d.cursor_pointer())

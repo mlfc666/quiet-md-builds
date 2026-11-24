@@ -250,13 +250,13 @@ impl Workspace {
     fn purge_trash(&mut self, ids: Vec<String>, success: &'static str, cx: &mut Context<Self>) {
         if self.store.file_task_busy() || self.file_history.busy || self.tree_writes_pending() || ids.is_empty() { return; }
         let Some(task_guard) = self.store.begin_file_task() else { return };
-        // Each root's 回收站 is its own: one writer, and one write, per root.
+        // Each top-level folder's 回收站 is its own: one writer, and one write, per top-level folder.
         let mut writers: Vec<(String, crate::store::Store, Vec<String>)> = vec![];
         for id in &ids {
-            let Some(key) = self.store.trash_root(id) else { continue };
+            let Some(key) = self.store.trash_top(id) else { continue };
             match writers.iter_mut().find(|(k, _, _)| *k == key) {
                 Some((_, _, v)) => v.push(id.clone()),
-                None => if let Some(w) = self.store.root_writer(&key) { writers.push((key, w, vec![id.clone()])); },
+                None => if let Some(w) = self.store.top_writer(&key) { writers.push((key, w, vec![id.clone()])); },
             }
         }
         let task = cx.background_executor().spawn(async move {
@@ -319,7 +319,7 @@ impl Workspace {
     /// restored or a picture brought back by Undo since the list was made
     /// keeps its file.
     pub(crate) fn remove_unused_assets(&mut self, names: Vec<(String, u64)>, window: &Window, cx: &mut Context<Self>) {
-        let root = crate::store::Store::root_dir();
+        let root = crate::store::Store::active_dir();
         let (live, outside) = self.sweep_inputs(window, cx);
         cx.spawn(async move |this, cx| {
             let gone = cx.background_executor().spawn(async move {
@@ -371,7 +371,7 @@ impl Workspace {
             }
             Confirm::SaveFailed => self.resolve_save_failed(true, window, cx),
             Confirm::Migrate(_) => self.migrate_library(window, cx),
-            Confirm::RemoveRoot(key, _) => self.remove_root(&key, window, cx),
+            Confirm::RemoveFolder(key, _) => self.remove_folder(&key, window, cx),
             Confirm::Import { what, target } => self.import_dropped(what, target, window, cx),
         }
         cx.notify();
@@ -470,7 +470,7 @@ impl Workspace {
                     false,
                 )
             }
-            Confirm::RemoveRoot(_, name) => (
+            Confirm::RemoveFolder(_, name) => (
                 crate::localized_format!("从侧栏移除「{}」？", "Remove “{}” from the sidebar?", name),
                 crate::settings::tr("只是从侧栏去掉，文件夹里的文件不会删除。以后重新打开这个文件夹，置顶、历史版本和回收站都还在。", "It only leaves the sidebar; nothing in the folder is deleted. Open the folder again later and its pins, history and Trash are still there.").to_string(),
                 crate::settings::tr("移除", "Remove"),

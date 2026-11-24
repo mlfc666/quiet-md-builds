@@ -12,6 +12,7 @@
 //! the remote's tree is carried along untouched by each commit.
 
 use super::{Error, Result, Sha, SyncRemote, blob_sha, safe_path};
+use crate::merge_file::{FileMerge, Kind, merge_file};
 use crate::vfs::{self, KindExt, PathExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -37,6 +38,8 @@ pub fn synced(path: &str) -> bool {
         [".gitignore"] => true,
         [".quiet", "format.json"] => true,
         [".quiet", "meta", file] => file.ends_with(".json"),
+        // FORMAT 5's shared trash index and the copy FORMAT 6 keeps of it are this computer's.
+        [".quiet", "trash", "index.json" | "index.json.v5"] => false,
         [".quiet", "trash" | "themes", _, ..] => true,
         [".quiet", ..] => false,
         [".assets", "thumbs", ..] => false,
@@ -80,7 +83,7 @@ const GITIGNORE_END: &str = "# <<< Quiet.md";
 /// layouts' local files, since FORMAT 5 keeps them outside the library.
 const GITIGNORE: &[&str] = &[
     ".quiet/.lock", ".quiet/index.json", ".quiet/index.json.bak", ".quiet/*.corrupt-*", ".quiet/settings.json",
-    ".quiet/history/", ".quiet/history-trash/", ".quiet/before-folders-*/", ".assets/thumbs/",
+    ".quiet/history/", ".quiet/history-trash/", ".quiet/before-folders-*/", ".quiet/trash/index.json", ".quiet/trash/index.json.v5", ".assets/thumbs/",
     "*.sqlite-journal", "*.tmp", ".DS_Store", "Thumbs.db",
 ];
 
@@ -243,12 +246,14 @@ pub fn release(dir: &Path, path: &str) -> Result<()> {
 
 pub enum Merged {
     Clean(Vec<u8>),
-    /// `ours` stays in place (with whatever merged), `theirs` becomes a conflict copy.
-    Conflict { ours: Vec<u8>, theirs: Vec<u8> },
+    /// `merged` (ours plus whatever merged on its own) goes in place, `theirs`
+    /// becomes a conflict copy; `regions` is how many places kept ours over
+    /// theirs (1 when the whole file did), for the interface to say.
+    Conflict { merged: Vec<u8>, theirs: Vec<u8>, regions: usize },
 }
 
-/// How a file both sides changed comes together. The real one is the block
-/// merge (`merge3`, through `merge_file`); until that lands, [`KeepBoth`].
+/// How a file both sides changed comes together: [`DocMerger`] merges
+/// documents block by block; [`KeepBoth`] merges nothing.
 pub trait Merger {
     /// Whether `path` is merged by its contents (then `merge` gets the base).
     fn mergeable(&self, path: &str) -> bool;
@@ -261,7 +266,23 @@ pub struct KeepBoth;
 impl Merger for KeepBoth {
     fn mergeable(&self, _: &str) -> bool { false }
     fn merge(&self, _: &str, _: Option<&[u8]>, ours: &[u8], theirs: &[u8]) -> Merged {
-        if ours == theirs { Merged::Clean(ours.to_vec()) } else { Merged::Conflict { ours: ours.to_vec(), theirs: theirs.to_vec() } }
+        if ours == theirs { Merged::Clean(ours.to_vec()) } else { Merged::Conflict { merged: ours.to_vec(), theirs: theirs.to_vec(), regions: 1 } }
+    }
+}
+
+/// Documents (`.xml`, `.md`) merged by block (`merge_file`, sync.md 3.2);
+/// anything else as [`KeepBoth`].
+pub struct DocMerger;
+
+impl Merger for DocMerger {
+    fn mergeable(&self, path: &str) -> bool { Kind::of_name(path) != Kind::Other }
+    fn merge(&self, path: &str, base: Option<&[u8]>, ours: &[u8], theirs: &[u8]) -> Merged {
+        let kind = Kind::of_name(path);
+        if kind == Kind::Other { return KeepBoth.merge(path, base, ours, theirs) }
+        match merge_file(base, ours, theirs, kind) {
+            FileMerge::Clean(b) => Merged::Clean(b),
+            FileMerge::Conflicts { merged, regions, theirs } => Merged::Conflict { merged, theirs, regions: regions.len().max(1) },
+        }
     }
 }
 
@@ -278,6 +299,7 @@ pub enum First {
 }
 
 pub struct Options<'a> {
+    /// [`DocMerger`] unless set.
     pub merger: &'a dyn Merger,
     /// Where theirs goes when a file conflicts, e.g. `周报（冲突 · iPad · 11-22 14:30）.xml`
     /// for `周报.xml`; taken names get ` (2)`, ` (3)` …
@@ -294,9 +316,10 @@ pub struct Options<'a> {
 }
 
 impl<'a> Options<'a> {
-    /// Asking on a first sync with files on both sides, three tries, GitHub's limits.
-    pub fn new(merger: &'a dyn Merger, conflict_copy: &'a dyn Fn(&str) -> String, message: &'a dyn Fn(&[String]) -> String) -> Self {
-        Options { merger, conflict_copy, message, first: First::Ask, retries: 3, too_large: TOO_LARGE, large: LARGE }
+    /// Documents merged by block, asking on a first sync with files on both
+    /// sides, three tries, GitHub's limits.
+    pub fn new(conflict_copy: &'a dyn Fn(&str) -> String, message: &'a dyn Fn(&[String]) -> String) -> Self {
+        Options { merger: &DocMerger, conflict_copy, message, first: First::Ask, retries: 3, too_large: TOO_LARGE, large: LARGE }
     }
 }
 
@@ -309,8 +332,9 @@ pub struct Outcome {
     pub downloaded: Vec<String>,
     /// Changed on both sides and merged.
     pub merged: Vec<String>,
-    /// Changed on both sides and not merged: (the file, keeping ours; the conflict copy, theirs).
-    pub conflicts: Vec<(String, String)>,
+    /// Changed on both sides and not wholly merged: (the file, with ours where
+    /// they differ; the conflict copy, theirs; how many places differ).
+    pub conflicts: Vec<(String, String, usize)>,
     /// Past [`Options::too_large`]: not uploaded (path, size).
     pub too_large: Vec<(String, u64)>,
     /// Past [`Options::large`]: uploaded, but worth a word (path, size).
@@ -428,14 +452,14 @@ fn round(folder: &dyn Folder, remote: &dyn SyncRemote, dir: &Path, state: &mut S
                         if m != other { push.insert(p.clone(), Some(m)); }
                         out.merged.push(p);
                     }
-                    Merged::Conflict { ours: m, theirs: t } => {
+                    Merged::Conflict { merged: m, theirs: t, regions } => {
                         if m != mine { folder.write(&p, &m)? }
                         let copy = free_name(folder, &(o.conflict_copy)(&p), &taken_copies);
                         folder.write(&copy, &t)?;
                         taken_copies.insert(copy.clone());
                         state.held.insert(copy.clone());
                         if m != other { push.insert(p.clone(), Some(m)); }
-                        out.conflicts.push((p, copy));
+                        out.conflicts.push((p, copy, regions));
                     }
                 }
             }

@@ -9,6 +9,8 @@ def cargo(*args, env=None):
     subprocess.run(["cargo", *args], check=True, env=env)
 
 cargo("test", "--release", "--workspace", "--locked")
+# tools/vendor-sync is its own workspace (the patch series tool, vendor/PATCHES.md); a cold build takes seconds.
+cargo("test", "--locked", "--manifest-path", "tools/vendor-sync/Cargo.toml", "--target-dir", "target/tools")
 for library in ["shared-mock/library", "shared-mock/library-zh"]:
     cargo("test", "--release", "--locked", "-p", "fdl_core", "library_round_trips", "--", "--ignored",
           env={**os.environ, "FDL_ROUNDTRIP_DIR": str(Path(library).resolve())})

@@ -133,12 +133,7 @@ pub trait SyncRemote {
 
 /// Git's id for a file's contents (`git hash-object`), so a file on disk can
 /// be compared with the remote's without fetching it.
-pub fn blob_sha(bytes: &[u8]) -> Sha {
-    let mut h = sha1_smol::Sha1::new();
-    h.update(format!("blob {}\0", bytes.len()).as_bytes());
-    h.update(bytes);
-    h.digest().to_string()
-}
+pub use crate::sync_base::blob_sha;
 
 /// A path from the remote that is safe to write under the folder: relative,
 /// no `.` / `..` / empty parts, nothing Windows can't name.

@@ -101,6 +101,38 @@ pub fn process_id() -> u32 {
     #[cfg(target_family = "wasm")] { 1 }
 }
 
+/// When the file at `path` was made and last changed, in unix seconds, for
+/// an import to keep. Made: its creation time where the system keeps one
+/// (macOS, Windows; Linux on file systems with statx), else the change time,
+/// and never later than that (a copied file is made after its last change).
+/// None in the web build, or when neither can be read.
+pub fn file_times(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(not(target_family = "wasm"))] {
+        let m = std::fs::metadata(path).ok()?;
+        let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs());
+        let modified = m.modified().ok().and_then(secs)?;
+        let made = m.created().ok().and_then(secs).unwrap_or(modified).min(modified);
+        Some((made, modified))
+    }
+    #[cfg(target_family = "wasm")] { let _ = path; None }
+}
+
+/// When the file or folder at `path` was made, in unix seconds, where the
+/// system keeps that (macOS, Windows; Linux on file systems with statx).
+pub fn made_time(path: &Path) -> Option<u64> {
+    #[cfg(not(target_family = "wasm"))] { std::fs::metadata(path).ok()?.created().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()) }
+    #[cfg(target_family = "wasm")] { let _ = path; None }
+}
+
+/// Set the change time of the file at `path` to unix second `secs`, as a
+/// copy that keeps it (the web build keeps no times).
+pub fn set_modified(path: &Path, secs: u64) -> io::Result<()> {
+    #[cfg(not(target_family = "wasm"))] {
+        std::fs::File::options().write(true).open(path)?.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+    }
+    #[cfg(target_family = "wasm")] { let _ = (path, secs); Ok(()) }
+}
+
 /// Whether `path` is a lazy file still being fetched (web build): the UI shows
 /// it as loading, not missing. Always false on the desktop.
 pub fn pending(path: &Path) -> bool {

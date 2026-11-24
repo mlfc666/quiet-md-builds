@@ -367,7 +367,17 @@ fn table_step(c: &mut Core, rng: &mut Rng) -> String {
     let (nr, nc) = (t.rows.len(), t.ncols());
     let slot = |rng: &mut Rng| (rng.below(nr), rng.below(nc));
     let kind = *rng.pick(&[CellSelKind::Range, CellSelKind::Rows, CellSelKind::Cols]);
-    let s = CellSel { table, anchor: slot(rng), head: slot(rng), kind };
+    let mut s = CellSel { table, anchor: slot(rng), head: slot(rng), kind };
+    // Or one cell, as Shift+↑/↓ past its first / last text block selects it.
+    if rng.chance(25) {
+        let (r, col) = t.origin(rng.below(nr), rng.below(nc));
+        let mut ids = vec![];
+        super::table_ops::text_blocks(&t.rows[r][col].blocks, &mut ids);
+        let down = rng.chance(50);
+        if let Some(one) = (if down { ids.last() } else { ids.first() }).and_then(|id| c.cell_edge_sel(*id, down)) {
+            s = one;
+        }
+    }
     c.select_cells(s);
     let what = match rng.below(7) {
         0 => {

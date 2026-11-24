@@ -15,7 +15,7 @@ fn only_quiet_mds_files_are_synced() {
         ".quiet/history/周报/1.xml", ".quiet/history-trash/x.xml", ".quiet/index.json", ".quiet/settings.json", ".quiet/.lock",
         ".quiet/meta/x.txt", ".quiet/trash", ".assets/thumbs/a.png", ".assets", "表.sqlite-journal", "周报.xml.1234.tmp",
         ".DS_Store", "a/.DS_Store", "Thumbs.db", ".git/config", ".obsidian/x.md", "a/.hidden/x.xml", "photo.png", "notes.txt",
-        "a/.gitignore", "x.lock",
+        "a/.gitignore", "x.lock", ".quiet/trash/index.json", ".quiet/trash/index.json.v5",
     ] { assert!(!synced(p), "{p}") }
 }
 
@@ -71,7 +71,8 @@ impl Device {
         if !self.state.join(STATE).fs_exists() { State::new("o/r", "main").save(&self.state).unwrap() }
         let copy = |p: &str| copy_name(self.name, p);
         let message = |paths: &[String]| format!("{} ({})", titles(paths).join("、"), self.name);
-        let mut o = Options::new(merger, &copy, &message);
+        let mut o = Options::new(&copy, &message);
+        o.merger = merger;
         o.first = First::Merge;
         edit(&mut o);
         sync(&self.folder(), remote, &self.state, &o)
@@ -128,7 +129,7 @@ fn both_changing_a_file_leaves_a_conflict_copy_here() {
     a.sync(&r);
     let o = b.sync(&r);
     let copy = "周报（冲突 · iPad）.xml".to_string();
-    assert_eq!(o.conflicts, vec![("周报.xml".to_string(), copy.clone())]);
+    assert_eq!(o.conflicts, vec![("周报.xml".to_string(), copy.clone(), 1)]);
     // Ours stays and goes up; theirs is the copy, here only.
     assert_eq!(b.files(), map(&[("周报.xml", "ipad"), ("周报（冲突 · iPad）.xml", "mac")]));
     assert_eq!(remote_text(&r), map(&[("周报.xml", "ipad")]));
@@ -144,7 +145,7 @@ fn both_changing_a_file_leaves_a_conflict_copy_here() {
     a.write("周报.xml", "mac2");
     b.write("周报.xml", "ipad2");
     a.sync(&r);
-    assert_eq!(b.sync(&r).conflicts, vec![("周报.xml".to_string(), "周报（冲突 · iPad） (2).xml".to_string())]);
+    assert_eq!(b.sync(&r).conflicts, vec![("周报.xml".to_string(), "周报（冲突 · iPad） (2).xml".to_string(), 1)]);
     // A copy the person deleted is no longer held.
     b.remove("周报（冲突 · iPad） (2).xml");
     b.sync(&r);
@@ -267,7 +268,7 @@ fn first_sync_three_ways() {
     assert_eq!(c.state().commit, None);
     // Told to merge: both kept, the one both have differently as a conflict copy.
     let o = c.sync(&r);
-    assert_eq!(o.conflicts, vec![("周报.xml".to_string(), "周报（冲突 · Windows）.xml".to_string())]);
+    assert_eq!(o.conflicts, vec![("周报.xml".to_string(), "周报（冲突 · Windows）.xml".to_string(), 1)]);
     assert_eq!(c.files(), map(&[("周报.xml", "other"), ("周报（冲突 · Windows）.xml", "1"), ("自己的.md", "mine"), (".assets/a.png", "png")]));
     assert_eq!(remote_text(&r), map(&[("周报.xml", "other"), ("自己的.md", "mine"), (".assets/a.png", "png")]));
 }
@@ -360,6 +361,76 @@ fn the_base_is_the_last_synced_version() {
     assert_eq!(kept, 1);
 }
 
+// ------------------------------------------------------------ documents merged by block
+
+/// A document as DocxXML writes it.
+fn xml(paras: &[&str]) -> String {
+    let body: String = paras.iter().map(|p| format!("<p>{p}</p>\n")).collect();
+    crate::docxml::serialize(&crate::docxml::parse(&format!("<title>周报</title>\n{body}")).unwrap())
+}
+
+#[test]
+fn edits_to_different_paragraphs_of_a_document_both_land() {
+    let (r, a, b) = (FakeRemote::new(), Device::new("MacBook"), Device::new("iPad"));
+    let m = DocMerger;
+    a.write("周报.xml", &xml(&["一", "二", "三", "四"]));
+    a.write("提案.md", "# 提案\n\n第一段\n\n第二段\n\n- 甲\n- 乙\n\n第三段\n");
+    a.sync_by(&r, &m, |_| {}).unwrap();
+    b.sync_by(&r, &m, |_| {}).unwrap();
+    a.write("周报.xml", &xml(&["一 mac", "二", "三", "四"]));
+    a.write("提案.md", "# 提案\n\n第一段 mac\n\n第二段\n\n- 甲\n- 乙\n\n第三段\n");
+    b.write("周报.xml", &xml(&["一", "二", "三", "四 ipad", "五"]));
+    b.write("提案.md", "# 提案\n\n第一段\n\n第二段\n\n- 甲\n- 乙\n- 丙\n\n第三段 ipad\n");
+    a.sync_by(&r, &m, |_| {}).unwrap();
+    let o = b.sync_by(&r, &m, |_| {}).unwrap();
+    assert_eq!((o.merged, o.conflicts), (vec!["周报.xml".to_string(), "提案.md".to_string()], vec![]));
+    a.sync_by(&r, &m, |_| {}).unwrap();
+    let want = map(&[
+        ("周报.xml", xml(&["一 mac", "二", "三", "四 ipad", "五"]).as_str()),
+        ("提案.md", "# 提案\n\n第一段 mac\n\n第二段\n\n- 甲\n- 乙\n- 丙\n\n第三段 ipad\n"),
+    ]);
+    // No conflict copy on either side, both edits in both.
+    assert_eq!((a.files(), b.files(), remote_text(&r)), (want.clone(), want.clone(), want));
+}
+
+#[test]
+fn both_editing_one_paragraph_keeps_the_merge_here_and_theirs_as_a_copy() {
+    for (p, base, mac, ipad, merged) in [
+        ("周报.xml", xml(&["一", "二", "三"]), xml(&["一 mac", "二", "三 mac"]), xml(&["一 ipad", "二", "三"]), xml(&["一 ipad", "二", "三 mac"])),
+        ("提案.md", "第一段\n\n第二段\n\n第三段\n".into(), "第一段 mac\n\n第二段\n\n第三段 mac\n".into(), "第一段 ipad\n\n第二段\n\n第三段\n".into(), "第一段 ipad\n\n第二段\n\n第三段 mac\n".into()),
+    ] {
+        let (r, a, b) = (FakeRemote::new(), Device::new("MacBook"), Device::new("iPad"));
+        a.write(p, &base);
+        a.sync(&r);
+        b.sync(&r);
+        a.write(p, &mac);
+        b.write(p, &ipad);
+        a.sync_by(&r, &DocMerger, |_| {}).unwrap();
+        let o = b.sync_by(&r, &DocMerger, |_| {}).unwrap();
+        // Here: ours where both edited, theirs merged in elsewhere; theirs whole in the copy.
+        let copy = copy_name("iPad", p);
+        assert_eq!(o.conflicts, vec![(p.to_string(), copy.clone(), 1)], "{p}");
+        assert_eq!(b.files(), map(&[(p, merged.as_str()), (copy.as_str(), mac.as_str())]), "{p}");
+        assert_eq!(remote_text(&r), map(&[(p, merged.as_str())]), "{p}");
+        a.sync_by(&r, &DocMerger, |_| {}).unwrap();
+        assert_eq!(a.files(), map(&[(p, merged.as_str())]), "{p}");
+    }
+}
+
+#[test]
+fn other_files_are_not_merged_by_contents() {
+    let (r, a, b) = (FakeRemote::new(), Device::new("MacBook"), Device::new("iPad"));
+    a.write("白板.excalidraw", "base");
+    a.sync(&r);
+    b.sync(&r);
+    a.write("白板.excalidraw", "mac");
+    b.write("白板.excalidraw", "ipad");
+    a.sync_by(&r, &DocMerger, |_| {}).unwrap();
+    let o = b.sync_by(&r, &DocMerger, |_| {}).unwrap();
+    assert_eq!(o.conflicts, vec![("白板.excalidraw".to_string(), "白板（冲突 · iPad）.excalidraw".to_string(), 1)]);
+    assert_eq!(b.read("白板.excalidraw").as_deref(), Some("ipad"));
+}
+
 // ------------------------------------------------------------ random two-device runs
 
 struct Rng(u64);
@@ -438,5 +509,58 @@ fn checked_sync(d: &Device, r: &FakeRemote, seed: u64) {
         if !racing && after.get(p) != Some(s) && !known.contains(&blob_sha(s.as_bytes())) && !after.values().any(|v| v == s) {
             assert!(here.contains(s), "seed {seed}: {p} = {s} overwritten by {} and not kept", d.name);
         }
+    }
+}
+
+const DOCS: &[&str] = &["周报.xml", "a/甲.xml", "b/c/丙.xml"];
+
+/// Two devices edit documents block by block (the generator of
+/// `merge/tests.rs`), remove them, sync, get pushed ahead of and go offline,
+/// at random, merged by [`DocMerger`]: no sync fails, every document here
+/// stays well formed, each conflict leaves its copy, and two more rounds
+/// leave both devices and the remote with the same files.
+#[test]
+fn random_document_edits_merge_and_meet() {
+    use crate::docxml::{parse, serialize};
+    use crate::merge::tests::{NESTED, Rng as DocRng, edited};
+    let base = parse(NESTED).unwrap();
+    for seed in 0..seeds() {
+        let mut rng = DocRng(seed * 7919 + 1);
+        let r = FakeRemote::new();
+        let devices = [Device::new("A"), Device::new("B")];
+        for _ in 0..30 {
+            let d = &devices[rng.below(2)];
+            let p = DOCS[rng.below(DOCS.len())];
+            match rng.below(10) {
+                0..=3 => { let now = d.read(p).map_or(base.clone(), |s| parse(&s).unwrap()); d.write(p, &serialize(&edited(&now, &mut rng))) }
+                4 => if d.read(p).is_some() { d.remove(p) },
+                5 => {
+                    let now = r.files("main").into_iter().find(|(q, _)| q == p).map_or(base.clone(), |(_, b)| parse(std::str::from_utf8(&b).unwrap()).unwrap());
+                    r.race("main", vec![(p.to_string(), Some(serialize(&edited(&now, &mut rng)).into_bytes()))]);
+                }
+                6 => r.set_offline(rng.below(3) == 0),
+                _ => merged_sync(d, &r, seed),
+            }
+        }
+        r.set_offline(false);
+        for _ in 0..2 { for d in &devices { merged_sync(d, &r, seed) } }
+        let shared = |d: &Device| {
+            let held = d.state().held;
+            d.files().into_iter().filter(|(p, _)| synced(p) && !held.contains(p)).collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(shared(&devices[0]), shared(&devices[1]), "seed {seed}");
+        assert_eq!(shared(&devices[0]), remote_text(&r), "seed {seed}");
+    }
+}
+
+fn merged_sync(d: &Device, r: &FakeRemote, seed: u64) {
+    match d.sync_by(r, &DocMerger, |o| o.retries = 2) {
+        Ok(o) => for (p, copy, n) in &o.conflicts { assert!(*n >= 1 && d.read(copy).is_some(), "seed {seed}: {p} → {copy} ({n})") }
+        Err(Error::Offline(_)) | Err(Error::Rejected) => {}
+        Err(e) => panic!("seed {seed}: {e}"),
+    }
+    for (p, s) in d.files() {
+        let doc = crate::docxml::parse(&s).unwrap_or_else(|e| panic!("seed {seed}: {p} of {}: {e}", d.name));
+        assert_eq!(crate::docxml::serialize(&doc), s, "seed {seed}: {p} of {} does not round-trip", d.name);
     }
 }
