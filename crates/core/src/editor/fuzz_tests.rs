@@ -121,7 +121,7 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
     }
     let us = c.units();
     let any = |rng: &mut Rng| rng.pick(&us).id;
-    match rng.below(26) {
+    match rng.below(27) {
         0..=2 => {
             let s = *rng.pick(TEXTS);
             c.insert_text(s);
@@ -225,6 +225,12 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
         20 if rng.chance(20) => board_step(c, rng),
         20 => table_step(c, rng),
         21 => object_step(c, rng),
+        26 => {
+            let (image, target) = (any(rng), any(rng));
+            let before = rng.chance(50);
+            c.move_image_beside(image, target, before);
+            format!("move_image_beside({image:?}, {target:?}, {before})")
+        }
         22 => {
             if c.sel.head.block != TITLE && !c.is_code(c.sel.head.block) {
                 let images = parse("<title></title><img src=\"screenshot.png\"/><p></p>").unwrap();

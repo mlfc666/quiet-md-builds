@@ -1976,6 +1976,7 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "下移块" => "Move block down",
         "复制文件地址" => "Copy file path",
         "已复制文件地址" => "File path copied",
+        "已复制图片" => "Image copied",
         "已复制为 Markdown" => "Copied as Markdown",
         "为当前窗口选择合适页宽" => "Choose a page width for this window",
         "默认" => "Default",
@@ -2554,6 +2555,9 @@ fn diagnostic_for(message: &str, english: bool) -> String {
         ("回收站目录读取不完整：{}", "Could not fully read the Trash directory: {}"),
         ("无法清理过期回收站文档 {}：{}", "Could not remove expired Trash document {}: {}"),
         ("回收站索引保存失败：{}", "Could not save Trash index: {}"),
+        ("{}还在 iCloud 上没有下载，这次没有读取", "{} is still only in iCloud and wasn't read this time"),
+        ("{}还在 iCloud 上没有下载，没有写入，以免覆盖其他设备的内容", "{} is still only in iCloud and wasn't written, so as not to overwrite another device's data"),
+        ("这篇文档还在从 iCloud 下载，请稍后再打开", "This document is still downloading from iCloud. Open it again in a moment."),
         ("恢复文档 {} 失败，已恢复的文档保留在文档库", "Could not restore document {}. Documents already restored remain in Documents."),
         ("文档已恢复，回收站索引清理失败：{}", "Document restored, but the Trash index could not be cleaned up: {}"),
     ];

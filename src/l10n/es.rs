@@ -764,6 +764,7 @@ pub(super) const STRINGS: &[(&str, &str)] = &[
     ("复制为 Markdown", "Copiar como Markdown"),
     ("复制文件地址", "Copiar ruta del archivo"),
     ("已复制文件地址", "Ruta del archivo copiada"),
+    ("已复制图片", "Imagen copiada"),
     ("拷贝为 Markdown", "Copiar como Markdown"),
     ("已复制为 Markdown", "Copiado como Markdown"),
     ("更改…", "Cambiar…"),
@@ -1072,4 +1073,10 @@ pub(super) const STRINGS: &[(&str, &str)] = &[
     ("只是从侧栏去掉，文件夹里的文件不会删除。以后重新打开这个文件夹，置顶、历史版本和回收站都还在。", "Solo sale de la barra lateral; no se borra nada de la carpeta. Si vuelves a abrirla, sus fijados, su historial y su Papelera seguirán ahí."),
     ("从侧栏移除「{}」？", "¿Quitar «{}» de la barra lateral?"),
     ("切换深色 / 浅色", "Cambiar modo oscuro"),
+    ("{}还在 iCloud 上没有下载，这次没有读取", "{} aún no se ha descargado de iCloud y no se leyó esta vez"),
+    ("{}还在 iCloud 上没有下载，没有写入，以免覆盖其他设备的内容", "{} aún no se ha descargado de iCloud y no se escribió para no sobrescribir los datos de otro dispositivo"),
+    ("这篇文档还在从 iCloud 下载，请稍后再打开", "Este documento aún se está descargando de iCloud. Vuelve a abrirlo en un momento."),
+    ("正在从 iCloud 下载…", "Descargando de iCloud…"),
+    ("这篇文档还没有从 iCloud 下载完成", "Este documento aún no ha terminado de descargarse de iCloud"),
+    ("无法从 iCloud 下载这篇文档：{}", "No se pudo descargar este documento de iCloud: {}"),
 ];

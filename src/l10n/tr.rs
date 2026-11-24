@@ -1005,6 +1005,7 @@ pub(super) const STRINGS: &[(&str, &str)] = &[
     ("已复制为 Markdown", "Markdown olarak kopyalandı"),
     ("复制文件地址", "Dosya yolunu kopyala"),
     ("已复制文件地址", "Dosya yolu kopyalandı"),
+    ("已复制图片", "Görsel kopyalandı"),
     ("快速搜索", "Hızlı arama"),
     ("未找到字体", "Yazı tipi bulunamadı"),
     ("画板：在文档里插入，或直接打开 .excalidraw 文件", "Çizim tahtaları: bir nota ekleyin veya doğrudan .excalidraw dosyası açın"),
@@ -1125,4 +1126,10 @@ pub(super) const STRINGS: &[(&str, &str)] = &[
     ("只是从侧栏去掉，文件夹里的文件不会删除。以后重新打开这个文件夹，置顶、历史版本和回收站都还在。", "Yalnızca kenar çubuğundan çıkar; klasördeki hiçbir şey silinmez. Klasörü daha sonra yeniden açtığınızda sabitlenenleri, geçmişi ve Çöp Kutusu yerinde olur."),
     ("从侧栏移除「{}」？", "“{}” kenar çubuğundan kaldırılsın mı?"),
     ("切换深色 / 浅色", "Karanlık modu aç / kapat"),
+    ("{}还在 iCloud 上没有下载，这次没有读取", "{} henüz iCloud'dan indirilmedi, bu sefer okunmadı"),
+    ("{}还在 iCloud 上没有下载，没有写入，以免覆盖其他设备的内容", "{} henüz iCloud'dan indirilmedi; başka bir cihazın verilerinin üzerine yazmamak için yazılmadı"),
+    ("这篇文档还在从 iCloud 下载，请稍后再打开", "Bu belge hâlâ iCloud'dan indiriliyor. Birazdan yeniden açın."),
+    ("正在从 iCloud 下载…", "iCloud'dan indiriliyor…"),
+    ("这篇文档还没有从 iCloud 下载完成", "Bu belgenin iCloud'dan indirilmesi henüz tamamlanmadı"),
+    ("无法从 iCloud 下载这篇文档：{}", "Bu belge iCloud'dan indirilemedi: {}"),
 ];

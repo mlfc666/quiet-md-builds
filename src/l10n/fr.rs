@@ -1018,6 +1018,7 @@ pub(super) const STRINGS: &[(&str, &str)] = &[
     ("已复制为 Markdown", "Copié en Markdown"),
     ("复制文件地址", "Copier le chemin du fichier"),
     ("已复制文件地址", "Chemin du fichier copié"),
+    ("已复制图片", "Image copiée"),
     ("快速搜索", "Recherche rapide"),
     ("未找到字体", "Aucune police trouvée"),
     ("画板：在文档里插入，或直接打开 .excalidraw 文件", "Tableaux : ajoutez-en un dans une note, ou ouvrez un fichier .excalidraw"),
@@ -1157,4 +1158,10 @@ pub(super) const STRINGS: &[(&str, &str)] = &[
     ("只是从侧栏去掉，文件夹里的文件不会删除。以后重新打开这个文件夹，置顶、历史版本和回收站都还在。", "Il quitte seulement la barre latérale ; rien n’est supprimé du dossier. Rouvrez-le plus tard : ses épinglés, son historique et sa Corbeille seront toujours là."),
     ("从侧栏移除「{}」？", "Retirer « {} » de la barre latérale ?"),
     ("切换深色 / 浅色", "Basculer le mode sombre"),
+    ("{}还在 iCloud 上没有下载，这次没有读取", "{} n’est pas encore téléchargé depuis iCloud et n’a pas été lu cette fois"),
+    ("{}还在 iCloud 上没有下载，没有写入，以免覆盖其他设备的内容", "{} n’est pas encore téléchargé depuis iCloud et n’a pas été écrit, pour ne pas écraser les données d’un autre appareil"),
+    ("这篇文档还在从 iCloud 下载，请稍后再打开", "Ce document est encore en cours de téléchargement depuis iCloud. Rouvrez-le dans un instant."),
+    ("正在从 iCloud 下载…", "Téléchargement depuis iCloud…"),
+    ("这篇文档还没有从 iCloud 下载完成", "Ce document n’a pas fini de se télécharger depuis iCloud"),
+    ("无法从 iCloud 下载这篇文档：{}", "Impossible de télécharger ce document depuis iCloud : {}"),
 ];

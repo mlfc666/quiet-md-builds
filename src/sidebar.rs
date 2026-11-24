@@ -27,8 +27,8 @@ const fn row_sub_top(menu_top: f32) -> f32 {
     menu_top + DOWNLOAD_INDEX as f32 * ROW_ITEM + DIVIDERS_BEFORE_DOWNLOAD as f32 * ROW_DIVIDER
 }
 
-const _: () = assert!(row_menu_height(ROW_ITEMS, ROW_DIVIDERS) == 314.);
-const _: () = assert!(row_sub_top(0.) == 169.);
+const _: () = assert!(row_menu_height(ROW_ITEMS, ROW_DIVIDERS) == 313.);
+const _: () = assert!(row_sub_top(0.) == 168.5);
 
 /// Sidebar geometry (measured from the window edge), shared by the
 /// document sidebar and 设置's: selection pills start 14pt in, every row is

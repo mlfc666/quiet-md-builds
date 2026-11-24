@@ -277,7 +277,7 @@ pub const G: Geo = Geo {
     button_h: 36., button_r: R - 2., button_px: 10., button_sm_h: 32.,
     field_h: 36., field_r: R - 2., field_sm_h: 32., field_sm_r: R - 2., field_px: 10.,
     area_r: R - 2., area_pad: 10.,
-    menu_r: R - 2., menu_pad: 4., menu_row_h: 32., menu_row_r: R - 4., menu_row_px: 8., menu_gap: 8., rule_inset: 0.,
+    menu_r: R - 2., menu_pad: 4., menu_row_h: 32., menu_row_r: R - 4., menu_row_px: 8., menu_gap: 8., rule_inset: 12.,
     popover_pad: 16., popover_gap: 16., panel_gap: 8., label_gap: 8.,
     dialog_r: R + 4., dialog_pad: 24., dialog_gap: 24.,
     badge_h: 20., badge_r: radius::PILL, badge_px: 8.,

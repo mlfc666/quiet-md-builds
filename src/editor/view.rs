@@ -1966,6 +1966,21 @@ impl Editor {
         true
     }
 
+    /// The image toolbar's 复制: that image alone, as ⌘C copies it when it
+    /// is block-selected. ⌘C itself is unchanged.
+    pub(super) fn copy_image(&mut self, id: BlockId, cx: &mut Context<Self>) -> bool {
+        let Some(b) = self.core.block(id).cloned() else { return false };
+        let doc = Document { blocks: vec![b], ..Default::default() };
+        let (text, xml) = (doc.plain_text(), docxml::serialize(&doc));
+        // A script's stand-in clipboard (devtools `clip`) instead of the system one.
+        if let Some(f) = crate::clipboard::FAKE_CLIPBOARD.lock().unwrap().as_mut() {
+            *f = crate::clipboard::FakeClipboard { text: xml, ..Default::default() };
+            return true;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(text, xml));
+        true
+    }
+
     /// 复制为 Markdown (#60): the selection, or the whole document when
     /// nothing is selected, as Markdown text only.
     pub fn copy_markdown(&mut self, cx: &mut Context<Self>) {
