@@ -238,7 +238,7 @@ impl Editor {
         let (p, lh) = self.point_of(Pos::new(m.block, m.trigger))?;
         let q = self.mention_query();
         let results = self.mention_results();
-        let mut list = div().id("mention-list").max_h(px(366.)).overflow_y_scroll().track_scroll(&self.mention_scroll).py(px(crate::design::menu::PAD)).flex().flex_col();
+        let mut list = div().id("mention-list").max_h(px(366.)).overflow_y_scroll().track_scroll(&self.mention_scroll).py(px(crate::design::menu::PAD)).flex().flex_col().child(crate::design::scroll::bar("mention-list", &self.mention_scroll, crate::design::geo().menu_r));
         if results.is_empty() {
             list = list.child(div().p(px(16.)).text_size(px(13.)).line_height(px(20.)).text_color(Theme::text_caption()).child(ui_text(crate::settings::text("没有匹配结果，换个关键词试试吧"))));
         }

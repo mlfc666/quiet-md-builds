@@ -21,6 +21,7 @@ pub mod control;
 pub mod dialog;
 pub mod field;
 pub mod menu;
+pub mod scroll;
 pub mod toolbar;
 
 // The library's surface, whether or not every piece has a caller yet.
@@ -39,7 +40,8 @@ pub use dialog::{Dialog, DialogFocus, scrim};
 #[allow(unused_imports)]
 pub use field::{Field, FieldSize, Label, Textarea};
 #[allow(unused_imports)]
-pub use menu::{MenuItem, MenuLabel, MenuSeparator, Popover};
+pub use scroll::ScrollBar;
+pub use menu::{Align, MenuItem, MenuLabel, MenuSeparator, Popover, hang, room};
 pub use toolbar::{ButtonGroup, ButtonGroupSeparator, Toggle, ToggleSize, Toolbar};
 
 use crate::theme::{dark, rgbaf};
@@ -324,6 +326,12 @@ pub mod shadow {
     pub fn popover() -> Vec<BoxShadow> {
         if dark() { return vec![ring(rgbaf(255, 255, 255, 0.14), 0.5), s(rgbaf(0, 0, 0, 0.6), 12., 32., -8.)]; }
         vec![ring(rgbaf(0, 0, 0, 0.08), 0.5), s(rgbaf(0, 0, 0, 0.14), 8., 24., -6.), s(rgbaf(0, 0, 0, 0.06), 2., 6., -2.)]
+    }
+    /// A frozen column's edge over the columns scrolled under it (飞书's): shadow-sm turned to the
+    /// right (`0 1px 3px / 0 1px 2px -1px`, black 10%), on an element at that edge.
+    pub fn sticky() -> Vec<BoxShadow> {
+        let side = |a: f32, x: f32, blur: f32, spread: f32| { let mut d = drop(a, 0., blur, spread); d.offset.x = px(x); d };
+        vec![side(0.1, 1., 3., 0.), side(0.1, 1., 2., -1.)]
     }
     /// A dialog: the popover's edge over a deeper drop (it sits over a dimmed window).
     pub fn dialog() -> Vec<BoxShadow> {

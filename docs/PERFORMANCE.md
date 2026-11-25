@@ -105,6 +105,36 @@ Measured 2026-11-25 on the same Mac mini, but with another build of the app busy
 - Rendering is unchanged: screenshots of the compilation (top and three wheel positions), the guides (Writing and formatting, Welcome, Playground), and a Chinese page with quotes in the default face, Songti SC, PingFang SC, Hiragino Sans GB and Heiti SC are identical to main's, pixel for pixel (`tools/harness/compare.py`).
 - Wheel scrolling did not slow down: five alternating runs of 300 steps of 40 pt each way, mean 3.48 / 2.90 ms (down / up) against main's 3.57 / 2.92, with fewer frames over 8.3 ms (65 against 160). Opening the compilation, first frame 30.8-34.0 ms against 33.2-35.8. Typing and backspacing ([readme-performance.txt](../tools/harness/examples/readme-performance.txt)) are unchanged within the noise.
 
+## Dragging blocks
+
+[block-drag.txt](../tools/harness/examples/block-drag.txt) opens the 1,000,000-character compilation, presses the handle of its first paragraph and drags it 4 pt a step: 120 steps down (480 pt, past 14 blocks), 120 back up, then 120 frames held at the window's bottom edge, where the page scrolls under it. `bench` draws a frame after each step. Dragged blocks now open a grey slot their size where they would land and the blocks between slide aside on springs; the slides are drawn moved (`Shift`, an offset at prepaint), not laid out again, so no row is measured again while it slides.
+
+Measured 2026-11-25 on an Apple M6 Mac mini (16 GiB, macOS 27.2.1), 1280 × 800 pt window, Craft theme, `--features devtools` release builds, three runs each, alternating. Means of the three: frame mean, frames over 16.7 ms and over 8.3 ms (of 120), and the p50 of the step (the drag event: finding the drop), of the frame and of the editor's own `render`:
+
+| Build | Phase | Frame mean | Over 16.7 / 8.3 | Step p50 | Frame p50 | Render p50 |
+|---|---|---:|---:|---:|---:|---:|
+| main (cc0a4c0) | down | 14.9 ms | 59 / 101 | 5.6 ms | 16.5 ms | 14.2 ms |
+| main | up | 18.6 ms | 100 / 118 | 6.9 ms | 19.4 ms | 16.4 ms |
+| main | held at the edge | 20.0 ms | 100 / 118 | 6.9 ms | 20.8 ms | 16.3 ms |
+| this change | down | 4.1 ms | 0 / 0 | 0.04 ms | 4.1 ms | 0.07 ms |
+| this change | up | 4.2 ms | 0 / 0 | 0.05 ms | 4.3 ms | 0.08 ms |
+| this change | held at the edge | 6.9 ms | 1 / 27 | 0.04 ms | 6.4 ms | 0.09 ms |
+
+- Before, a drag cost about 16 ms of `render` a frame whatever moved, from three walks of the whole document: the selection's word count and the set of selected blocks each listed the selected blocks again every frame (`block_sel_ids` walks every block twice and indexes their paths), and the word count built an index of every block. A dragged block is selected, so every frame paid it. Both are now kept until the selection or the document changes. The same cost was paid by any frame with blocks selected, not only while dragging.
+- Finding the drop under the pointer (each drag event and each frame) walked every top-level block (tens of thousands) and indexed every block: 5-7 ms. It now walks only the top-level blocks the page drew rows of.
+- Held at the edge, the page scrolls 600 pt/s and lays out rows it has not shown yet; that is what is left (as when scrolling).
+- Pages not being dragged draw as before: screenshots of the test document (still, hovered, block menu, selected, scrolled), the compilation (top and two wheel positions) and [menus.txt](../tools/harness/examples/menus.txt) are identical to main's, pixel for pixel (`tools/harness/compare.py`).
+
+Reproduce (the same temporary library as above):
+
+```sh
+cargo build --release --locked --features devtools
+python3 tools/harness/run.py tools/harness/examples/block-drag.txt /tmp/quiet-perf/library /tmp/quiet-perf/block-drag
+grep -a bench /tmp/quiet-perf/block-drag/log
+```
+
+To watch the slides themselves in a scripted run, set `FDL_ANIMATE=1` (tools/harness/README.md): a scripted window's animation frames are otherwise throttled.
+
 ## Large libraries
 
 A user who imported an Obsidian vault of more than 15,000 Markdown notes found browsing almost unusable. This section measures that case before and after the fix on `perf/big-library`.
@@ -168,7 +198,20 @@ Before the fix, most of each frame went to work that grows with the library and 
 - A folder card on Home walked every entry once for each folder under it and copied every document below it, to paint the newest four.
 - Home and a folder's page copied and sorted their whole level, 3,016 entries for `Inbox`, and copied it once more for the grid.
 
-Now only the pinned entries are sorted, and the rest is built once and kept until something it shows changes (`tree::shape_key`, a hash of every field the rows and cards show or are sorted by), so an unchanged frame does none of it. The tree build itself looks up only the folders instead of every id. What is left of `render_sidebar` is mostly `shape_key` (about 0.25 ms a frame) and the rows' spring state. Screenshots of every view above, the row menu and `examples/menus.txt` are pixel-identical before and after (`compare.py`).
+Now only the pinned entries are sorted, and the rest is built once and kept until the entries change, so an unchanged frame does none of it. The tree build itself looks up only the folders instead of every id. Screenshots of every view above, the row menu and `examples/menus.txt` are pixel-identical before and after (`compare.py`).
+
+The rows and cards were first kept by a hash of every field they show (`tree::shape_key`), computed a few times a frame, because the window's entries were assigned in some 70 places and nothing said when they changed. They are now an `Entries` ([entries.rs](../src/entries.rs)): read as a slice, changed only through `set`, `edit` and `take`, each giving them a new `generation` from one counter (a list replaced whole never repeats a number). The sidebar's rows, Home's level and the folder cards' papers are rebuilt when it moves; assigning a `Vec` to the field no longer compiles. Browsing the views above moves it six times in all (the load, the first sort, opening a document). Measured 2026-11-26 against `032e2fb`, three runs alternating, `bench 600 noop` with a 4 s `sample` in each view, medians, ms a frame:
+
+| View | `Window::draw` | `Workspace::render` | of which `render_sidebar` | `shape_key` |
+|---|---:|---:|---:|---:|
+| Inbox open | 2.81 → 1.56 | 0.93 → 0.30 | 0.67 → 0.28 | 0.49 → 0 |
+| Inbox closed | 2.18 → 0.88 | 0.62 → 0.10 | 0.43 → 0.08 | 0.41 → 0 |
+| Sidebar scrolled | 2.96 → 1.48 | 1.16 → 0.37 | 0.90 → 0.35 | 0.50 → 0 |
+| Home | 3.35 → 0.92 | 1.01 → 0.21 | 0.78 → 0.20 | 1.17 → 0 |
+| Home scrolled | 3.64 → 1.78 | 0.97 → 0.46 | 0.75 → 0.41 | 1.28 → 0 |
+| Document | 1.21 → 0.85 | 0.68 → 0.41 | 0.66 → 0.38 | 0.22 → 0 |
+
+Home hashed the entries three times a frame (its level, the folder cards, the sidebar). Frame P50 from the same runs jumps with the core the main thread lands on (performance or efficiency, above) and says little; the samples are steadier. The screenshots of the seven views in all three runs, `examples/menus.txt`, and a script that adds a page, opens folders and goes to Home are pixel-identical before and after, except the new page's row, which differs by up to 4/255 between two runs of the same build too.
 
 ### Still on the main thread
 
@@ -176,7 +219,7 @@ These grow with the library too. Times are for the 15,000-note vault, with a lib
 
 | Operation | When | Before | After |
 |---|---|---:|---:|
-| `Store::list`, the first time | Opening a library for the first time: every note is read | 2.0 s | 2.0 s |
+| `Store::list`, the first time | Opening a library for the first time: every note is read | 2.0 s | off the main thread (below) |
 | `Store::list` | Every time the window comes forward (`app.rs`, window activation), and 2 s after files change on disk | 70-78 ms (4 ms) | 38-44 ms (3 ms) |
 | `Store::save_editor` | Every autosave while typing | 52-57 ms (8 ms) | 12 ms (8 ms) |
 
@@ -193,7 +236,52 @@ Now memory is known to be what the disk says while nothing has changed since thi
 
 A save compares only the entries that changed since the last write and the folders they left or went to (their order keys), not the whole index. Tests check both against the old way: in the test build every skipped read is compared with reading everything again, and every save with comparing the whole index.
 
-What is left of `list` is finding the files (`layout::scan` and a `stat` for each note, most of its 40 ms); of a save, writing this device's metadata file whole, as FORMAT 6 keeps it. The first `list` of a new library still reads every note on the main thread.
+What is left of `list` is finding the files (`layout::scan` and a `stat` for each note, most of its 40 ms); of a save, writing this device's metadata file whole, as FORMAT 6 keeps it.
+
+### Opening a big library the first time
+
+The first `list` reads every note (no parse cache yet), and the first folder opened under 手动排序 numbers every page (`initialize_manual_order`, a write of every entry). Both ran on the main thread before the window's first frame, which stayed empty meanwhile.
+
+Now ([loading.rs](../src/loading.rs)) a `tree_writer` of each top-level folder lists it (and numbers its pages) on a background thread, counting into a `ListProgress`, and hands everything back at once; the main store takes over what it read (`Store::adopt`). The window waits up to 150 ms for it before its first frame, so a small or already-read library opens exactly as before. Past that, sidebar and 主页 stay empty until 300 ms, then grey rows and the onboarding's drifting light show how far it got (正在载入 3,214 / 15,000 篇), and fade out over what was found, from the second frame after the hand-back.
+
+Meanwhile search, 新建 and the imports say the library is still loading and do nothing, rather than queue work that would happen by surprise later; a Markdown file opened from the Finder or dropped on the window opens where it is. Listing meanwhile (after such a write) reads no note, and the hand-back then lists once more, with every note already read.
+
+`initialize_manual_order` also no longer rewrites the index when the numbers are already right. A FORMAT 5/6 library never kept `home_manual_initialized` (its settings live in the device files, which hold only some of them), so every folder opened under 手动排序 rewrote the whole index: 184 ms for 15,000 notes.
+
+Cold first open (no parse cache), measured 2026-11-25 on the Mac mini above, [harness](../tools/harness/README.md) with `FDL_RECORD_START`:
+
+| | 300 notes | 15,000 notes | 60,000 notes |
+|---|---:|---:|---:|
+| Before the first frame | as before (listed within the 150 ms) | 150 ms | 150 ms |
+| Listing in the background | — | 0.6-1.0 s | 2.4-7.8 s |
+| Main-thread frame while loading, P50 | — | 1-7 ms | 0.6-1.2 ms |
+| Taking the result in (one frame) | — | 55-71 ms | 300-420 ms |
+
+An import (Markdown files, a folder, an Obsidian vault, 思源笔记) is written by a `tree_writer` off the main thread the same way; it now lists the library there too, and the window's store takes over the writer (`Store::adopt`) instead of reading the whole library again to find the new pages. Taking an import of 20 notes in, on the main thread (two runs each, against `b9c78d1`): 35-38 ms → 2-3 ms in a 2,000-note library, 173-206 ms → 15-18 ms in the 15,000-note one. `tools/harness/import_open.py` checks that what was imported is in front.
+
+Before, the 15,000-note window showed nothing for the 2.0 s of the `list` plus 1.1 s for the first folder's numbering. A file opened during loading costs one more `list` at the hand-back (264 ms for 60,000 notes). What the hand-back still takes is `begin_write` and `settings()` in opening the start folder, sorting the entries and the first frame laying out the rows.
+
+### Adding a code folder
+
+添加文件夹 on a folder of code checkouts used to stall the window for seconds: `list` went into every `node_modules`, `target` and `.venv`, wrote an entry for each of their folders and read every Markdown file there, and the 2 s check walked the whole tree again on the main thread. Now (see [What a folder shows](FORMAT.md#what-a-folder-shows)) the scan does not go into dependency and build folders or what `.gitignore` leaves out, lists only Markdown, DocxXML, whiteboards and 数据表, and writes no entry for a folder with nothing to show. The listing after adding runs on a background thread under the window's loading layer drawn over what is already shown (the sidebar keeps its rows), and when the 2 s check sees a top-level folder change, that folder is listed in the background and handed back (`SharedStore::begin_relist` / `end_relist`); if the window saved meanwhile, its own store lists again instead. Before adding, a folder with a project file at its top or one level down, or with more than 20,000 files, asks first (`shown::survey`, off the main thread; a folder that already has `.quiet/` does not ask).
+
+A generated tree of 40 checkouts (`tools/perf/gen_code_tree.py`, 315,285 files, 50,406 of them `.md` / `.xml` and folders the old scan took in), measured 2026-11-26 on the Mac mini above against `fdf3684`. Core steps with `add_folder_bench` (two runs each); the window with the harness, a timer on the main thread logging how late it fires:
+
+| | Before | After |
+|---|---:|---:|
+| First `list()` | 1,091-2,946 ms | 75-82 ms |
+| Later `list()` (window activated) | 584-611 ms | 62-66 ms |
+| `shape_at` (the 2 s check) | 521-613 ms | 60-114 ms |
+| Entries listed | 50,406 | 206 (126 notes, 80 folders) |
+| `.quiet/` written | 14 MB | 60 KB |
+| Core memory | 324 MB | 8 MB |
+| Longest main-thread stall adding it (window) | 1.26 s + 0.6 s (4.6 s cold) | under 100 ms |
+| Opening its folder page | 3.7 s, then ~110 ms frames | no stall |
+| Window peak memory | 846-852 MB | 152 MB |
+| 20 s of builds writing into `target/` | stalls up to 1.05 s, 3.07 s in all; `.quiet/` 28 MB | none over 80 ms; 128 KB |
+| 20 s of notes written into `docs/` | stalls up to 1.02 s | none over 80 ms |
+
+The same tree with its `Cargo.toml` / `package.json` / `pyproject.toml` (`--project-files`, the usual case, where `target`, `build` and `dist` are known for build output): `list()` 9-11 ms (28-30 ms the first time), `shape_at` 9-15 ms. The harness window misses its timer by 60-80 ms some 220 times a minute even idle, in both builds (its frame cadence parked off screen), so only longer delays count as stalls above. Activating the window still lists on the main thread: 63 ms at worst on this tree, 9-11 ms with project files.
 
 ### Reproduce
 
@@ -205,4 +293,10 @@ grep -a bench /tmp/quiet-big/run/log
 # list and save: on a copy, opened once by the app or by the first run
 cp -R /tmp/quiet-big/vault /tmp/quiet-big/store
 QUIET_MD_HOME=/tmp/quiet-big/store cargo run --release -p fdl_core --example store_bench /tmp/quiet-big/store
+# first open: a fresh copy under $TMPDIR (its parse cache goes there too), recorded from the first frame
+FDL_RECORD_START=/tmp/quiet-big/launch.mp4 python3 tools/harness/run.py <script> /tmp/quiet-big/vault $TMPDIR/quiet-big-run
+grep -a 'library:' $TMPDIR/quiet-big-run/log
+# adding a code folder: the tree under $TMPDIR, so what this computer keeps about it goes there too
+python3 tools/perf/gen_code_tree.py $TMPDIR/codetree        # --project-files for the usual case
+TMPDIR=$TMPDIR cargo run --release -p fdl_core --example add_folder_bench -- $TMPDIR/codetree 3
 ```

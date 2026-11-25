@@ -83,6 +83,9 @@ fn ease(t: f32) -> f32 {
 }
 
 thread_local! { static CURRENT: std::cell::Cell<Option<(AnyWindowHandle, usize)>> = const { std::cell::Cell::new(None) }; }
+/// The recording under way: its start, and where its frames go.
+type Frames = std::sync::mpsc::Sender<(f64, usize, usize, Vec<u8>)>;
+thread_local! { static RECORDING: std::cell::RefCell<Option<(Instant, Frames)>> = const { std::cell::RefCell::new(None) }; }
 static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Move a scripted window off screen where it still renders (unless `FDL_NOPARK`).
@@ -121,8 +124,9 @@ pub fn start(window: &mut Window, cx: &mut App) {
         return;
     }
     cx.spawn(async move |cx| {
+        // `FDL_RECORD_START=<file.mp4>`: recording from the window's first frame, before the script starts.
+        let mut recording: Option<std::rc::Rc<std::cell::Cell<bool>>> = std::env::var("FDL_RECORD_START").ok().map(|f| start_recording(handle, &f, cx));
         park(ns_view, cx).await;
-        let mut recording: Option<std::rc::Rc<std::cell::Cell<bool>>> = None;
         // Only leading whitespace is insignificant: `type ab ` types a trailing space.
         for line in script.lines().map(str::trim_start).filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
             let Some((handle, ns_view)) = CURRENT.with(|c| c.get()) else { break };
@@ -191,6 +195,31 @@ pub fn start(window: &mut Window, cx: &mut App) {
                 // Draw invalidated frames ourselves: the display link stops
                 // while the screen is locked, and nothing would render.
                 let end = Instant::now() + Duration::from_millis(rest.trim().parse().unwrap_or(100));
+                // `FDL_ANIMATE`: a frame every 16ms, as the display link would
+                // draw them for animations, recorded as drawn. Timers can't
+                // keep that pace with the display asleep, so the main thread
+                // waits between frames itself.
+                if std::env::var_os("FDL_ANIMATE").is_some() {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        while Instant::now() < end {
+                            let t = Instant::now();
+                            window.refresh();
+                            window.draw(cx).clear(cx);
+                            RECORDING.with(|r| {
+                                if let Some((start, tx)) = &*r.borrow()
+                                    && let Ok((w, h, px)) = frame(window, cx)
+                                {
+                                    let _ = tx.send((start.elapsed().as_secs_f64(), w, h, px));
+                                }
+                            });
+                            // Spinning: a sleep, too, oversleeps several times over.
+                            while t.elapsed() < Duration::from_millis(16) && Instant::now() < end {
+                                std::thread::yield_now();
+                            }
+                        }
+                    });
+                    continue;
+                }
                 while Instant::now() < end {
                     cx.background_executor().timer(Duration::from_millis(16).min(end - Instant::now())).await;
                     let _ = handle.update(cx, |_, window, cx| {
@@ -256,6 +285,7 @@ pub fn start(window: &mut Window, cx: &mut App) {
             if cmd == "record" || (quit && recording.is_some()) {
                 if let Some(stop) = recording.take() {
                     stop.set(true);
+                    RECORDING.with(|r| *r.borrow_mut() = None);
                     *CURSOR_LOG.lock().unwrap() = None;
                     // Lets the writer drain and ffmpeg finish the file.
                     cx.background_executor().timer(Duration::from_millis(300)).await;
@@ -403,6 +433,17 @@ pub fn start(window: &mut Window, cx: &mut App) {
             // Let the frame settle before the next step.
             cx.background_executor().timer(Duration::from_millis(120)).await;
         }
+        // A script that ends without `quit` quits anyway, so no scripted
+        // window is left behind; `FDL_KEEP_OPEN` keeps it to look at.
+        if std::env::var_os("FDL_KEEP_OPEN").is_none() {
+            if let Some(stop) = recording.take() {
+                stop.set(true);
+                RECORDING.with(|r| *r.borrow_mut() = None);
+                *CURSOR_LOG.lock().unwrap() = None;
+                cx.background_executor().timer(Duration::from_millis(300)).await;
+            }
+            cx.update(|cx| cx.quit());
+        }
     })
     .detach();
 }
@@ -509,8 +550,10 @@ mod native {
     /// Places scripted windows almost entirely past a screen edge that has no
     /// neighbouring display, so they neither cover the user's windows nor get
     /// covered (fully occluded windows stop rendering). Returns the candidate
-    /// origins, best first; the caller tries them until one stays visible
-    /// (a sliver behind the Dock counts as occluded).
+    /// origins, best first: the rightmost spot first, so with several displays
+    /// the sliver sits on the outer edge of the rightmost one rather than under
+    /// the windows on the main display. The caller tries them until one stays
+    /// visible (a sliver behind the Dock counts as occluded).
     pub fn park_candidates(ns_view: usize) -> Vec<CGPoint> {
         use core_graphics::geometry::CGSize;
         const SLIVER: f64 = 24.;
@@ -552,6 +595,7 @@ mod native {
                     }
                 }
             }
+            out.sort_by(|a, b| b.x.total_cmp(&a.x));
             out
         }
     }
@@ -1048,6 +1092,7 @@ fn start_recording(handle: AnyWindowHandle, path: &str, cx: &mut AsyncApp) -> st
         }
         eprintln!("devtools: recorded {out} ({next} frames)");
     });
+    RECORDING.with(|r| *r.borrow_mut() = Some((start, tx.clone())));
     let flag = stop.clone();
     cx.spawn(async move |cx| {
         while !flag.get() {
