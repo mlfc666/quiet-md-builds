@@ -753,7 +753,7 @@ fn esc(s: &str) -> String {
     o
 }
 
-fn esc_attr(s: &str) -> String {
+pub(crate) fn esc_attr(s: &str) -> String {
     esc(s).replace('"', "&quot;")
 }
 

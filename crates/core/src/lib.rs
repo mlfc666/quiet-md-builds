@@ -15,6 +15,7 @@ pub mod merge;
 pub mod merge_file;
 pub mod model;
 pub mod palette;
+pub mod paths;
 pub mod paste;
 pub mod remote;
 pub mod siyuan;

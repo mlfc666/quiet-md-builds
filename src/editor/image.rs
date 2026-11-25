@@ -2386,13 +2386,20 @@ pub(crate) fn image_block_from_file_in(assets: &Path, p: &Path) -> Result<Block,
 /// that exists. WeChat puts such a line in the pasteboard instead of
 /// image data (#252).
 pub(crate) fn local_image_path(line: &str) -> Option<PathBuf> {
-    let s = line.trim();
-    let decoded = s.strip_prefix("file://").map(crate::markdown::percent_decode);
-    let s = decoded.as_deref().unwrap_or(s);
+    let p = local_file(line.trim())?;
+    is_local_image_file(&p).then_some(p)
+}
+
+/// The file a picture's source names on this computer, if it is an absolute
+/// path: `/…`, Windows' `C:\…`, `C:/…` or `\\server\…`, or a `file://` URL
+/// (`file:///C:/…` on Windows). None for a URL, `data:` or a relative path.
+pub(crate) fn local_file(src: &str) -> Option<PathBuf> {
+    let decoded = src.strip_prefix("file://").map(crate::markdown::percent_decode);
+    let s = decoded.as_deref().unwrap_or(src);
     #[cfg(windows)]
     let s = if decoded.is_some() && s.starts_with('/') && s.as_bytes().get(2) == Some(&b':') { &s[1..] } else { s };
     let p = Path::new(s);
-    is_local_image_file(p).then(|| p.to_path_buf())
+    (p.fs_is_absolute() && (decoded.is_some() || !src.contains("://"))).then(|| p.to_path_buf())
 }
 
 pub(super) fn is_local_image_file(p: &Path) -> bool {
@@ -2435,8 +2442,9 @@ pub(crate) fn localize_images_in(assets: &Path, blocks: &mut Vec<Block>) {
             let ext = head.split(';').next().unwrap_or_default().replace("jpeg", "jpg");
             let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload.trim()) else { return false };
             image_block_named(assets, &bytes, &ext, None)
-        } else if src.starts_with('/') {
-            image_block_from_file_in(assets, Path::new(src.as_str()))
+        } else if let Some(file) = local_file(src) {
+            // Any absolute path, Windows' `C:\…` too: never left pointing at the folder it came from.
+            image_block_from_file_in(assets, &file)
         } else {
             return true;
         };
@@ -2458,7 +2466,7 @@ pub(crate) fn localize_images_in(assets: &Path, blocks: &mut Vec<Block>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{cap, clipboard_image_data, decode, decode_png, local_image_path, pasted_remote, BAD_DIMS};
+    use super::{cap, clipboard_image_data, decode, decode_png, local_file, local_image_path, pasted_remote, BAD_DIMS};
     use crate::model::{Block, BlockKind, RichText};
     use gpui::ImageFormat;
 
@@ -2583,5 +2591,20 @@ mod tests {
         assert_eq!(ext, "gif");
         assert!(matches!(bytes, std::borrow::Cow::Borrowed(_)));
         assert_eq!(&*bytes, img.bytes);
+    }
+
+    /// An absolute path is a local file on every platform's own terms (Windows'
+    /// `C:\…` and `C:/…` too), so an import copies it in; URLs and relative paths are not.
+    #[test]
+    fn local_file_takes_every_absolute_path() {
+        let here = std::env::temp_dir().join("pic.png");
+        assert_eq!(local_file(&here.to_string_lossy()), Some(here.clone()));
+        for no in ["https://e.com/a.png", "data:image/png;base64,AAAA", "pics/a.png", "./a.png", "..\\a.png"] { assert_eq!(local_file(no), None, "{no}"); }
+        #[cfg(unix)]
+        assert_eq!(local_file("file:///tmp/a%20b.png"), Some(std::path::PathBuf::from("/tmp/a b.png")));
+        #[cfg(windows)]
+        for (src, want) in [(r"C:\Users\a\pic.png", r"C:\Users\a\pic.png"), ("C:/Users/a/pic.png", "C:/Users/a/pic.png"), (r"\\server\share\pic.png", r"\\server\share\pic.png"), ("file:///C:/Users/a%20b/pic.png", "C:/Users/a b/pic.png")] {
+            assert_eq!(local_file(src), Some(std::path::PathBuf::from(want)), "{src}");
+        }
     }
 }

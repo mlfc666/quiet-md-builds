@@ -3,7 +3,7 @@
 <p>收件箱里的一条</p>
 
 ==== 读书笔记/全部块类型/全部块类型.xml
-<title icon="📚" cover="<库>/.assets/…/封面.png">全部块类型</title>
+<title icon="📚" cover=".assets/…/封面.png">全部块类型</title>
 <h1>一级标题</h1>
 <p>普通<b><em>粗斜</em></b><u>下划线</u><del>删除线</del><span background-color="light-yellow">高亮</span><code>行内代码</code> <code>⌘K</code> x2 H2O #读书 <a href="https://b3log.org/siyuan">思源</a> <latex>E=mc^2</latex> 备注词<span text-color="gray">（这是一条备注）</span> <span text-color="red" background-color="light-yellow"><b>红字黄底</b></span><br/>第二行</p>
 <h2 folded="true">折叠的标题</h2>
@@ -56,9 +56,9 @@
     <p align="center">右栏</p>
   </column>
 </grid>
-<img src="<库>/.assets/…/示意图.png" width="240" caption="图的标题" align="center"/>
-<p>附件：<source path="<库>/.assets/…/说明书.pdf" name="说明书.pdf"/></p>
-<figure view-type="Preview"><source path="<库>/.assets/…/片段.mp4" name="片段.mp4"/></figure>
+<img src=".assets/…/示意图.png" width="240" caption="图的标题" align="center"/>
+<p>附件：<source path=".assets/…/说明书.pdf" name="说明书.pdf"/></p>
+<figure view-type="Preview"><source path=".assets/…/片段.mp4" name="片段.mp4"/></figure>
 <pre lang="html"><code>&lt;ruby&gt;你&lt;rt&gt;nǐ&lt;/rt&gt;&lt;/ruby&gt;</code></pre>
 <p><a href="https://example.com/embed?a=1&amp;b=2">https://example.com/embed?a=1&amp;b=2</a></p>
 <p><b>第一页</b>

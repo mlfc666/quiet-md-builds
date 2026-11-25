@@ -779,7 +779,7 @@ impl Conv<'_> {
     fn local_images(&mut self, blocks: &mut [Block]) {
         for b in blocks {
             self.local_images(&mut b.children);
-            if let BlockKind::Image { src, .. } = &mut b.kind && !src.contains("://") && !src.starts_with('/') {
+            if let BlockKind::Image { src, .. } = &mut b.kind && !src.contains("://") && !Path::new(src.as_str()).fs_is_absolute() {
                 match self.asset(src).and_then(|p| self.assets.copy(&p)) {
                     Some(p) => *src = p.to_string_lossy().to_string(),
                     None => self.report.missing_assets.push(src.clone()),

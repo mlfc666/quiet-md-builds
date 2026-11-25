@@ -3115,7 +3115,7 @@ fn new_table_file() -> Option<String> {
     let name = format!("{}.sqlite", uuid::Uuid::new_v4());
     let path = crate::store::Store::assets_dir().join(&name);
     crate::table::sqlite::create(&path, &crate::table::blank_base()).ok()?;
-    path.strip_prefix(crate::store::Store::active_dir()).ok().map(|r| r.to_string_lossy().replace('\\', "/"))
+    fdl_core::paths::portable_in(&path, &crate::store::Store::active_dir())
 }
 #[cfg(target_family = "wasm")]
 fn new_table_file() -> Option<String> { None }

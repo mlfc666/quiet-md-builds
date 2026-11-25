@@ -85,7 +85,7 @@ jobs:
         if: steps.filter.outputs.skip != 'true'
         run: |
           sudo softwareupdate --install-rosetta --agree-to-license
-          cargo test --release --locked --target x86_64-apple-darwin --bin quiet_md update::tests
+          cargo test --release --locked --no-fail-fast --target x86_64-apple-darwin --bin quiet_md update::tests
 
       - name: Upload macOS validation packages
         if: steps.filter.outputs.skip != 'true'

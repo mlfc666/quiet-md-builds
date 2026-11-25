@@ -259,7 +259,7 @@ impl Writer<'_> {
         let assets = crate::store::Store::assets_in(&root);
         match self.opts.name.filter(|_| self.opts.base.is_some() && abs.starts_with(&assets) && abs.fs_is_file()) {
             Some(name) => self.beside(&abs, base, name, image),
-            None => relative(&abs, base).unwrap_or_else(|| abs.to_string_lossy().into_owned()),
+            None => crate::paths::portable(&abs, base).unwrap_or_else(|| abs.to_string_lossy().into_owned()),
         }
     }
 
@@ -322,31 +322,13 @@ impl Writer<'_> {
 }
 
 /// A link target that survives the parser: spaces and parentheses escaped.
-/// `path` from the folder `from`, `/`-separated, with `../` up to where they
-/// part; None when no relative path reaches it (another drive, or not absolute).
-fn relative(path: &Path, from: &Path) -> Option<String> {
-    if !path.fs_is_absolute() || !from.fs_is_absolute() { return None }
-    let (path, from) = (lexical(path), lexical(from));
-    let (p, f): (Vec<_>, Vec<_>) = (path.components().collect(), from.components().collect());
-    let same = p.iter().zip(&f).take_while(|(a, b)| a == b).count();
-    // Another drive (Windows' `C:` against `D:`): nothing in common to count from.
-    if same == 0 { return None }
-    let up = std::iter::repeat_n("..".to_string(), f.len() - same);
-    Some(up.chain(p[same..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned())).collect::<Vec<_>>().join("/"))
-}
-
-/// `path` with its `.` and `..` folded away, without asking the disk.
-fn lexical(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir if matches!(out.components().next_back(), Some(Component::Normal(_))) => { out.pop(); }
-            c => out.push(c),
-        }
-    }
-    out
+/// `b` (or a block in it) is a picture whose relative source is not beside the
+/// file (`resolve_present` left it) but is the library's own.
+fn stale(b: &Block, opts: &Options) -> bool {
+    let root = opts.library_dir.map(Path::to_path_buf).unwrap_or_else(crate::store::Store::active_dir);
+    let here = |src: &str| !src.contains("://") && !src.starts_with("data:") && !Path::new(src).fs_is_absolute() && crate::paths::resolve(&percent_decode(src), &root).fs_is_file();
+    matches!(&b.kind, BlockKind::Image { src, .. } if here(src)) || b.children.iter().any(|c| stale(c, opts))
+        || matches!(&b.kind, BlockKind::Table(t) if t.rows.iter().flatten().any(|c| c.blocks.iter().any(|c| stale(c, opts))))
 }
 
 /// `resolve_images` for a library Markdown file: a relative source is read
@@ -360,7 +342,7 @@ pub fn resolve_present(blocks: &mut [Block], dir: &Path) {
         }
         let BlockKind::Image { src, .. } = &mut b.kind else { continue };
         if src.contains("://") || src.starts_with("data:") || Path::new(src.as_str()).fs_is_absolute() { continue }
-        let path = lexical(&dir.join(percent_decode(src)));
+        let path = crate::paths::lexical(&dir.join(percent_decode(src)));
         if path.fs_is_file() { *src = path.to_string_lossy().into_owned(); }
     }
 }
@@ -719,6 +701,9 @@ fn preserve(original: &str, pieces: &[Piece], opts: &Options, strict: bool) -> S
             }
             let s = w.block(b, seq);
             if s.is_empty() && !list { continue; }
+            // A picture found only from the library (the file moved, or an older build
+            // wrote `.assets/…`) is written again, relative to the file: never kept as it was.
+            let s = if opts.dir.is_some() && stale(b, opts) { format!("{s}\u{0}") } else { s };
             old.push((s, *span));
             prev_list = list;
         }

@@ -52,26 +52,120 @@ pub(super) struct Merged { pub items: BTreeMap<String, BTreeMap<String, Won>>, p
 
 static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Each device file's name, size, modification time, `written` and whether
-/// it is still only in iCloud (a placeholder keeps the size and time it will have).
-pub(super) type Files = Vec<(String, u64, Option<web_time::SystemTime>, u64, bool)>;
+/// Each device file by name, as last seen.
+pub(super) type Files = Vec<(String, Seen)>;
 
+/// What a file's metadata tells of it: size, modification time, `written`,
+/// the time it last changed (Unix ctime; none elsewhere) and whether it is
+/// still only in iCloud (a placeholder keeps the size and time it will have).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Stat { pub len: u64, pub modified: Option<web_time::SystemTime>, pub written: u64, pub changed: Option<web_time::SystemTime>, pub dataless: bool }
+
+/// A file's `Stat` when it was read, and a hash of its contents then if it
+/// had changed within a `TICK` of that (`racy`).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Seen { pub stat: Stat, pub contents: Option<u64> }
+
+/// The coarsest step a file system's change time takes: Linux stamps a write
+/// from a clock that ticks every few milliseconds, HFS+ keeps whole seconds,
+/// FAT two. Two writes within one step can leave the same time behind.
+const TICK: std::time::Duration = std::time::Duration::from_secs(2);
+
+pub(super) fn stat(p: &Path, m: Option<&crate::vfs::Metadata>) -> Stat {
+    let dataless = crate::vfs::is_dataless(p);
+    #[cfg(unix)]
+    let changed = m.map(|m| { use std::os::unix::fs::MetadataExt; let (s, n) = (m.ctime(), m.ctime_nsec()); let d = std::time::Duration::new(s.unsigned_abs(), n as u32);
+        if s < 0 { web_time::SystemTime::UNIX_EPOCH - d } else { web_time::SystemTime::UNIX_EPOCH + d } });
+    #[cfg(not(unix))]
+    let changed = None;
+    Stat { len: m.map_or(0, |m| m.len()), modified: m.and_then(|m| m.modified().ok()), written: written(p, m, dataless), changed, dataless }
+}
+
+/// Whether a file seen at `at` may yet be written again in the same tick of
+/// its change time (or that time is ahead of this computer's clock): then its
+/// `Stat` can stay as it is through a write, and only its contents tell.
+pub(super) fn racy(stat: &Stat, at: web_time::SystemTime) -> bool {
+    !stat.dataless && stat.changed.is_some_and(|c| c + TICK > at)
+}
+
+/// `stat` seen at `at`, its contents hashed when `racy`.
+pub(super) fn seen(p: &Path, stat: Stat, at: web_time::SystemTime) -> Seen {
+    let contents = racy(&stat, at).then(|| contents(p));
+    Seen { stat, contents }
+}
+
+fn contents(p: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    crate::vfs::read(p).ok().hash(&mut h);
+    h.finish()
+}
+
+/// Whether a file still holds what it held when `last` was seen, now that
+/// its metadata says `now`: any change there says written; the same says so
+/// too unless `last` was seen within a tick of the file's change, and then
+/// the contents decide (`read` hashes them; called only then).
+pub(super) fn unchanged(last: &Seen, now: &Stat, read: impl FnOnce() -> u64) -> bool {
+    last.stat == *now && last.contents.is_none_or(|h| read() == h)
+}
+
+/// `path` seen now.
+pub(super) fn seen_now(p: &Path) -> Option<Seen> {
+    let at = web_time::SystemTime::now();
+    let m = crate::vfs::metadata(p).ok()?;
+    Some(seen(p, stat(p, Some(&m)), at))
+}
+
+/// Whether `p` is still as `last` saw it (`unchanged`); none: it wasn't there.
+pub(super) fn still(p: &Path, last: &Option<Seen>) -> bool {
+    match (last, crate::vfs::metadata(p).ok()) {
+        (Some(last), Some(m)) => unchanged(last, &stat(p, Some(&m)), || contents(p)),
+        (l, m) => l.is_none() && m.is_none(),
+    }
+}
+
+/// The device files seen now.
 pub(super) fn files(root: &Path) -> Files {
+    let at = web_time::SystemTime::now();
     let Ok(rd) = crate::vfs::read_dir(dir(root)) else { return vec![] };
     let mut out: Files = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).map(|p| {
         let m = crate::vfs::metadata(&p).ok();
-        let dataless = crate::vfs::is_dataless(&p);
-        (p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), m.as_ref().map_or(0, |m| m.len()), m.as_ref().and_then(|m| m.modified().ok()), written(&p, m.as_ref(), dataless), dataless)
+        (p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), seen(&p, stat(&p, m.as_ref()), at))
     }).collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+/// Whether the device files seen as `now` still hold what `was` saw
+/// (`unchanged`), leaving out `skip`.
+fn same_files(root: &Path, was: &Files, now: &Files, skip: Option<&str>) -> bool {
+    let keep = |f: &'_ Files| f.iter().filter(|(n, _)| Some(n.as_str()) != skip).cloned().collect::<Vec<_>>();
+    let (was, now) = (keep(was), keep(now));
+    was.len() == now.len() && was.iter().zip(&now).all(|((a, last), (b, seen))| a == b && unchanged(last, &seen.stat, || seen.contents.unwrap_or_else(|| contents(&dir(root).join(b)))))
+}
+
+/// The device files as `merged` saw them, seen again as at the moment each
+/// changed: well within its tick.
+#[cfg(test)]
+pub(super) fn seen_as_changed(root: &Path, merged: &mut Merged) {
+    for (n, last) in merged.files.iter_mut().flatten() { if let Some(c) = last.stat.changed { *last = seen(&dir(root).join(n), last.stat.clone(), c); } }
+}
+
+/// What a write within the same tick leaves on Unix: the `Stat` as `merged`
+/// saw it (elsewhere `written` hashes the contents, so nothing is held).
+#[cfg(test)]
+pub(super) fn change_times_held(root: &Path, merged: &mut Merged) {
+    if !cfg!(unix) { return }
+    let now = files(root);
+    for ((_, last), (_, seen)) in merged.files.iter_mut().flatten().zip(now) { last.stat = seen.stat; }
 }
 
 /// What changes whenever a file is written, though its size and time may not:
 /// a sync (iCloud, a git checkout, rsync) can put back the time a file had on
 /// the device that wrote it, and two writes can land on the same size. On
 /// Unix the inode and change time (ctime), which a write or a replacing
-/// rename always moves and nothing can set back; elsewhere a hash of the
+/// rename moves (but within a tick of the clock it stamps from: `racy`) and
+/// nothing can set back; elsewhere a hash of the
 /// contents (a placeholder's are not read: they would download).
 pub(super) fn written(p: &Path, m: Option<&crate::vfs::Metadata>, dataless: bool) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -87,11 +181,13 @@ pub(super) fn written(p: &Path, m: Option<&crate::vfs::Metadata>, dataless: bool
 }
 
 /// `merged` read again unless no device file was added, removed or changed
-/// (by name, size, time and `written`) since it was read (sync.md 3.3). Any
-/// change reads everything again. Whether it was read again.
+/// (`unchanged`) since it was read (sync.md 3.3). Any change reads
+/// everything again. Whether it was read again.
 pub(super) fn refresh(root: &Path, me: &str, merged: &mut Merged, warnings: &mut Vec<String>) -> bool {
     let now = files(root);
-    if merged.files.as_ref() == Some(&now) { return false }
+    // Kept as seen now: one seen within a tick of its change but no longer is
+    // trusted on its `Stat` from here on (a later write moves the change time past it).
+    if merged.files.as_ref().is_some_and(|was| same_files(root, was, &now, None)) { merged.files = Some(now); return false }
     // Taken before reading: a file changing meanwhile makes the next look read again.
     *merged = load(root, me, warnings);
     merged.files = Some(now);
@@ -392,9 +488,8 @@ fn write_own(root: &Path, me: &Device, merged: &mut Merged) -> Result<()> {
     crate::vfs::create_dir_all(dir(root))?;
     let own = format!("{}.json", me.id);
     save_json(&dir(root).join(&own), &DeviceFile { v: 1, device: me.clone(), items })?;
-    let others = |f: &Files| f.iter().filter(|e| e.0 != own).cloned().collect::<Files>();
     let now = files(root);
-    merged.files = merged.files.as_ref().filter(|was| others(was) == others(&now)).map(|_| now);
+    merged.files = merged.files.as_ref().filter(|was| same_files(root, was, &now, Some(&own))).map(|_| now);
     Ok(())
 }
 

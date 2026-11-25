@@ -265,8 +265,8 @@ fn colors_map_to_the_palette() {
 }
 
 /// The fixture workspace (tests/fixtures/siyuan, made by hand after Lute's
-/// node types): every page the import writes, by path, with the library's
-/// folder and the copies' random names written alike, then the report.
+/// node types): every page the import writes, by path, with the copies'
+/// random names written alike, then the report.
 fn snapshot(lib: &Path, report: &Report) -> String {
     fn files(dir: &Path, out: &mut Vec<PathBuf>) {
         for e in crate::vfs::read_dir(dir).into_iter().flatten().flatten() {
@@ -279,15 +279,13 @@ fn snapshot(lib: &Path, report: &Report) -> String {
     files(lib, &mut pages);
     pages.sort();
     let random = regex::Regex::new(r"\.assets/(?:[0-9a-f]{8}-|files/[0-9a-f-]{36}/)").unwrap();
-    let in_library = regex::Regex::new(r#"<库>[^"]*"#).unwrap();
     let mut out = String::new();
     for p in pages {
         let xml = crate::vfs::read_to_string(&p).unwrap();
         // What the import wrote reads back to the same file.
         assert_eq!(crate::docxml::serialize(&crate::docxml::parse(&xml).unwrap()), xml, "{}", p.display());
-        // The library's own paths with `/` on every platform (Windows writes `\` in them today).
-        let xml = xml.replace(&lib.to_string_lossy().to_string(), "<库>");
-        let xml = in_library.replace_all(&xml, |c: &regex::Captures| c[0].replace('\\', "/"));
+        // The library's own files relative to it, with `/` (docs/FORMAT.md).
+        assert!(!xml.contains(&*lib.to_string_lossy()) && !xml.contains('\\'), "{}", p.display());
         out.push_str(&format!("==== {}\n{}\n", p.strip_prefix(lib).unwrap().to_string_lossy().replace('\\', "/"), random.replace_all(&xml, ".assets/…/")));
     }
     out.push_str(&format!("==== 报告\n笔记本 {}，文档 {}，失败 {:?}\n降级 {:?}\n块引用 {:?}\n失效引用 {:?}\n嵌入 {}，查询 {}\n数据库 {:?}\n缺失资源 {:?}\n属性 {}\n",
