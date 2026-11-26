@@ -1,24 +1,26 @@
 name: sync-upstream
 
-# Keeps this repository level with s1dashu/quiet-md.
+# Keeps two branches level with s1dashu/quiet-md:
 #
-# The fork only *adds* files (workflows, packaging scripts, docs); it never edits
-# upstream sources. That is why this merges instead of replaying patches the way
-# patch-based forks (MindustryX and friends) have to: a merge of two disjoint
-# change sets cannot conflict, and if a future change does touch upstream code
-# the merge reports it instead of silently dropping a patch.
+#   upstream-main   everything upstream has, checked every hour. daily-build
+#                   turns its tip into the date-stamped pre-releases.
+#   main            only what upstream *released*: one merge per upstream release
+#                   tag, so main and the stable builds follow upstream's releases
+#                   rather than its commits.
 #
-# When upstream moves, the merge is pushed to main and the build workflows are
-# dispatched explicitly, because a push made with GITHUB_TOKEN does not trigger
-# other workflows.
+# The fork only adds files (workflows, the packaging scripts, this sync), which
+# is why a plain merge is enough and why the merges cannot conflict; a future
+# change that does touch upstream code surfaces as a conflict instead of a
+# silently dropped patch. scripts/ci-merge-upstream.sh holds that merge.
 on:
   schedule:
-    # Every six hours; upstream releases are not more frequent than that.
-    - cron: '17 */6 * * *'
+    # Hourly: "real time" for a mirror, and cheap — a run with nothing to merge
+    # finishes in under a minute. Use '*/30 * * * *' for half-hourly.
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       force:
-        description: 'Rebuild even when upstream has no new commits'
+        description: 'Rebuild the newest upstream release even if it is already released here'
         type: boolean
         default: false
 
@@ -33,126 +35,104 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # A token that can push to main; the default GITHUB_TOKEN is enough
-          # here because the workflow only writes to this repository.
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-tags: true
 
       - name: Configure git
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-      - name: Merge upstream main
-        id: merge
+      - name: Add the upstream remote
         run: |
           set -euo pipefail
-          git remote add upstream https://github.com/s1dashu/quiet-md.git
+          git remote add upstream https://github.com/s1dashu/quiet-md.git 2>/dev/null ||
+            git remote set-url upstream https://github.com/s1dashu/quiet-md.git
           git fetch --no-tags upstream main
-          upstream_sha=$(git rev-parse upstream/main)
-          echo "upstream=$upstream_sha"
+          echo "upstream main: $(git rev-parse upstream/main)"
 
-          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
-            echo "Upstream is already contained in main."
-            echo "updated=false" >> "$GITHUB_OUTPUT"
+      # The rolling branch: everything upstream has. It starts where the fork is
+      # on its first run and is only ever advanced by a merge of upstream main.
+      - name: Track upstream main
+        run: scripts/ci-merge-upstream.sh upstream-main upstream/main main
+
+      # The stable branch. Upstream tags are fetched into a private namespace
+      # because `refs/tags/` holds this fork's own tags, whose commits are its
+      # merges; overwriting one would move a release that is already published.
+      - name: Release the newest upstream tag on main
+        id: release
+        env:
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --force upstream 'refs/tags/v*:refs/upstream/tags/v*'
+          latest=$(git for-each-ref --format='%(refname:lstrip=3)' refs/upstream/tags \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          if [ -z "$latest" ]; then
+            echo 'upstream has no release tags.'
+            echo 'released=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "newest upstream release: $latest"
+
+          if git rev-parse -q --verify "refs/tags/$latest" > /dev/null; then
+            if [ "$FORCE" != true ]; then
+              echo "$latest is already released here."
+              echo 'released=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "rebuilding $latest on request."
+            echo "tag=$latest" >> "$GITHUB_OUTPUT"
+            echo 'released=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Remember where main was before the merge: the workflow guard below
-          # needs our own copy of .github/workflows/, not the merged one.
-          echo "before=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-          # --no-edit keeps the default merge message; a conflict fails the job
-          # loudly instead of leaving a half-merged tree behind.
-          if ! git merge --no-edit "$upstream_sha"; then
-            echo "::error::Upstream merge conflicts with this fork's changes; resolve by hand."
-            git merge --abort || true
-            exit 1
+          if git merge-base --is-ancestor "refs/upstream/tags/$latest" refs/remotes/origin/main; then
+            # main is already past this release — a tag cut from a maintenance
+            # branch, or one main merged before the split. Tag the released
+            # commit itself rather than newer code wearing its version number.
+            target="refs/upstream/tags/$latest^{commit}"
+            echo "main already contains $latest; tagging the upstream commit."
+          else
+            scripts/ci-merge-upstream.sh main "refs/upstream/tags/$latest" main
+            target=$(git rev-parse HEAD)
           fi
 
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "updated=true" >> "$GITHUB_OUTPUT"
-          git log --oneline -3
-
-      # GITHUB_TOKEN is a GitHub App token and cannot create or update files
-      # under .github/workflows/ without the `workflows` permission, so a merge
-      # that brings in an upstream CI change is rejected at push time:
-      #
-      #   refusing to allow a GitHub App to create or update workflow
-      #   `.github/workflows/ci.yml` without `workflows` permission
-      #
-      # This fork ships its own build workflows and does not need upstream's, so
-      # the workflow directory is restored to our version before pushing. The
-      # upstream sources still merge normally.
-      - name: Keep this fork's workflows
-        if: steps.merge.outputs.updated == 'true'
-        run: |
-          set -euo pipefail
-          before=${{ steps.merge.outputs.before }}
-          git checkout "$before" -- .github/workflows/
-          # `checkout <tree> -- <dir>` restores the files that existed but keeps
-          # the ones upstream just added, and a push that creates a workflow file
-          # is rejected outright, so those have to go by hand.
-          for added in $(git diff --name-only --diff-filter=A "$before" HEAD -- .github/workflows/); do
-            git rm -q -f "$added"
-          done
-          if git diff --cached --quiet; then
-            echo "No upstream workflow changes to drop."
-          else
-            git commit -m "ci: keep this fork's workflows (upstream CI is not used here)"
-            echo "Upstream workflow changes were dropped."
+          if [ "v$version" != "$latest" ]; then
+            echo "::warning::$latest carries version $version in Cargo.toml; tagging it as $latest."
           fi
 
-      - name: Push the merge
-        if: steps.merge.outputs.updated == 'true'
-        run: git push origin HEAD:main
+          git tag -a "$latest" "$target" -m "Quiet.md ${latest#v} (upstream release)"
+          git push origin "refs/tags/$latest"
+          echo "tag=$latest" >> "$GITHUB_OUTPUT"
+          echo 'released=true' >> "$GITHUB_OUTPUT"
 
-      - name: Tag the new upstream version
-        if: steps.merge.outputs.updated == 'true'
-        id: tag
-        run: |
-          set -euo pipefail
-          version=${{ steps.merge.outputs.version }}
-          tag="v${version}"
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "Tag $tag already exists; builds will be dispatched without a new tag."
-            echo "created=false" >> "$GITHUB_OUTPUT"
-          else
-            git tag -a "$tag" -m "Quiet.md $version (upstream sync)"
-            git push origin "$tag"
-            echo "created=true" >> "$GITHUB_OUTPUT"
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      # A push made with GITHUB_TOKEN does not start other workflows, so the
-      # builds are requested explicitly. Without a tag they only produce
-      # artifacts; with a tag they also attach to the release.
-      - name: Dispatch the builds
-        if: steps.merge.outputs.updated == 'true' || inputs.force
+      # A push made with GITHUB_TOKEN does not start the `push: tags` build
+      # workflows, so the builds are requested explicitly. The REST endpoint is
+      # used directly because `gh workflow run` reports failures only through its
+      # exit code, in a log that some networks cannot download.
+      - name: Dispatch the stable builds
+        if: steps.release.outputs.released == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
           REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
-          ref=${{ steps.tag.outputs.created == 'true' && steps.tag.outputs.tag || 'main' }}
-          echo "Dispatching builds on $ref"
           failed=0
           for wf in build-linux build-macos build-windows; do
-            # The REST endpoint is used directly: `gh workflow run` needs the
-            # workflow file to exist on the default branch and reports failures
-            # only through its exit code, which is hard to read from a log that
-            # some networks cannot download.
             code=$(curl -sS -o /tmp/dispatch.json -w '%{http_code}' -X POST \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/$REPO/actions/workflows/$wf.yml/dispatches" \
-              -d "{\"ref\":\"$ref\"}")
+              -d "{\"ref\":\"$TAG\"}")
             if [[ $code == 204 ]]; then
-              echo "  $wf requested"
+              echo "  $wf requested on $TAG"
             else
               echo "::error::$wf dispatch failed (HTTP $code): $(head -c 300 /tmp/dispatch.json)"
               failed=1
@@ -160,42 +140,12 @@ jobs:
           done
           exit $failed
 
-      # macOS runners are frequently unavailable for minutes at a time and the
-      # job is then cancelled, not failed. Re-request the macOS build after a
-      # wait instead of leaving the release without its DMGs; the build workflow
-      # itself is idempotent (overwrite_files) so a duplicate request is safe.
-      - name: Retry the macOS build when the runner was unavailable
-        if: steps.merge.outputs.updated == 'true' || inputs.force
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -uo pipefail
-          ref=${{ steps.tag.outputs.created == 'true' && steps.tag.outputs.tag || 'main' }}
-          sleep 90
-          run_id=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/$REPO/actions/workflows/build-macos.yml/runs?per_page=1&branch=$ref" \
-            | python3 -c "import json,sys;d=json.load(sys.stdin);print((d.get('workflow_runs') or [{}])[0].get('id',''))")
-          if [[ -n $run_id ]]; then
-            concl=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-              "https://api.github.com/repos/$REPO/actions/runs/$run_id" \
-              | python3 -c "import json,sys;print(json.load(sys.stdin).get('conclusion') or '')")
-            echo "macOS run $run_id conclusion: ${concl:-running}"
-            if [[ $concl == cancelled || $concl == failure ]]; then
-              curl -sS -o /dev/null -X POST \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                "https://api.github.com/repos/$REPO/actions/workflows/build-macos.yml/dispatches" \
-                -d "{\"ref\":\"$ref\"}" && echo "macOS build re-requested"
-            fi
-          fi
-
       - name: Summary
         run: |
           {
-            echo "### Upstream sync"
-            echo ""
-            echo "- upstream: \`${{ steps.merge.outputs.updated }}\` updated"
-            echo "- version: \`${{ steps.merge.outputs.version || 'unchanged' }}\`"
-            echo "- tag created: \`${{ steps.tag.outputs.created || 'no' }}\`"
+            echo '### Upstream sync'
+            echo ''
+            echo "- newest upstream release: \`${{ steps.release.outputs.tag || 'none' }}\`"
+            echo "- released here: \`${{ steps.release.outputs.released || 'false' }}\`"
+            echo "- upstream-main: advanced by the tracking step above, when upstream moved"
           } >> "$GITHUB_STEP_SUMMARY"

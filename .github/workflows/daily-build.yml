@@ -1,29 +1,30 @@
 name: daily-build
 
-# A pre-release of upstream main, built every morning whether or not upstream
-# tagged a release. sync-upstream keeps this branch level with s1dashu/quiet-md
-# every six hours; this workflow turns that into a date-stamped pre-release
+# A pre-release of `upstream-main`, built every morning whether or not upstream
+# tagged a release. sync-upstream keeps that branch level with s1dashu/quiet-md
+# every hour; this workflow turns its tip into a date-stamped pre-release
 # (`v0.1.14-daily.20261126`) carrying the same assets as a stable one, so the
-# newest code is downloadable without waiting for an upstream tag.
+# newest code is downloadable without waiting for an upstream tag. Stable
+# releases stay where they belong: on main, when upstream tags one.
 #
-# The version is bumped in the tag's commit, not on main: the version is what
-# About, the installers and the package names show, so a daily has to carry its
-# date there, but main keeps upstream's version so sync-upstream still merges
-# cleanly and the next upstream release tags as usual.
+# The version is bumped in the tag's commit, not on either branch: the version is
+# what About, the installers and the package names show, so a daily has to carry
+# its date there, while `upstream-main` keeps upstream's version so the next
+# merge stays trivial.
 #
 # What this workflow does not do, on purpose:
 # - sign or notarize anything (CI cannot),
 # - touch the update manifests (a daily is never served to stable users),
-# - widen who can be tempted to install it: every daily is marked pre-release
-#   and never becomes the repository's "Latest".
+# - become the repository's "Latest": every daily is marked pre-release, and a
+#   pre-release cannot hold that badge.
 #
-# Quiet days build too — that is also the daily proof that main still compiles.
-# Set the repository variable DAILY_SKIP_UNCHANGED=true to skip instead when
-# upstream has not moved since the previous daily.
+# Quiet days build too — that is also the daily proof that upstream still
+# compiles here. Set the repository variable DAILY_SKIP_UNCHANGED=true to skip
+# instead when upstream has not moved since the previous daily.
 on:
   schedule:
-    # 20:17 UTC is 04:17 in Asia/Shanghai, between two of sync-upstream's runs.
-    # GitHub's queue is busiest on the hour, hence :17.
+    # 20:17 UTC is 04:17 in Asia/Shanghai. GitHub's queue is busiest on the
+    # hour, hence :17.
     - cron: '17 20 * * *'
   workflow_dispatch:
     inputs:
@@ -43,6 +44,10 @@ concurrency:
 env:
   REPO: ${{ github.repository }}
   UPSTREAM: https://github.com/s1dashu/quiet-md.git
+  # `gh` resolves the repository from the git remotes, and this job has an
+  # `upstream` remote pointing at someone else's repository: name it explicitly,
+  # or every release call lands on the wrong side (it did once).
+  GH_REPO: ${{ github.repository }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   # A build is named after the maintainer's day: 20:17 UTC is 04:17 here, and a
   # UTC stamp would put yesterday's date on today's build.
@@ -53,12 +58,6 @@ jobs:
     name: tag and publish
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # The same lock as sync-upstream, because both push merges of upstream into
-    # main and must not do it at once. Only this short job holds it; the builds
-    # below do not.
-    concurrency:
-      group: sync-upstream
-      cancel-in-progress: false
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
       published: ${{ steps.plan.outputs.published }}
@@ -66,6 +65,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # The rolling branch, not the default one: that is what a daily is.
+          ref: upstream-main
           fetch-depth: 0
           fetch-tags: true
 
@@ -74,66 +75,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-      # Same merge as sync-upstream, and for the same reasons: this fork only
-      # adds files, so two disjoint change sets cannot conflict, and a future
-      # change that does touch upstream code surfaces as a conflict instead of
-      # a silently dropped patch. Whichever workflow runs first does the merge;
-      # the other finds upstream already contained and does nothing.
-      - name: Merge upstream main
-        run: |
-          set -euo pipefail
-          git remote add upstream "$UPSTREAM" 2>/dev/null ||
-            git remote set-url upstream "$UPSTREAM"
-          git fetch --no-tags upstream main
-          upstream_sha=$(git rev-parse upstream/main)
-          echo "upstream=$upstream_sha"
-
-          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
-            echo 'main already contains upstream/main.'
-            exit 0
-          fi
-
-          before=$(git rev-parse HEAD)
-          if ! git merge --no-edit "$upstream_sha"; then
-            echo '::error::upstream/main conflicts with this fork; merge it by hand (sync-upstream runs the same merge).'
-            git merge --abort || true
-            exit 1
-          fi
-
-          # GITHUB_TOKEN is a GitHub App token and cannot create or update
-          # files under .github/workflows/, so a merge that brings in an
-          # upstream CI change is rejected at push time. This fork ships its
-          # own workflows; keep them and drop upstream's, exactly as
-          # sync-upstream does.
-          git checkout "$before" -- .github/workflows/
-          # `checkout <tree> -- <dir>` restores the files that existed but keeps
-          # the ones upstream just added, so those have to be dropped by hand.
-          for added in $(git diff --name-only --diff-filter=A "$before" HEAD -- .github/workflows/); do
-            git rm -q -f "$added"
-          done
-          if ! git diff --cached --quiet; then
-            git commit -q -m "ci: keep this fork's workflows (upstream CI is not used here)"
-          fi
-
-          # main only moves under this lock, but a human push could still land
-          # between the fetch and this push; retry on the rarer race instead of
-          # failing a build over it.
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
-              break
-            fi
-            if [ "$attempt" = 3 ]; then
-              echo '::error::push to main was rejected three times.'
-              exit 1
-            fi
-            sleep 10
-            git fetch origin main
-            git merge --no-edit origin/main || {
-              echo '::error::main moved and now conflicts with the upstream merge.'
-              exit 1
-            }
-          done
-
       - name: Plan today's build
         id: plan
         env:
@@ -141,12 +82,21 @@ jobs:
           SKIP_UNCHANGED: ${{ vars.DAILY_SKIP_UNCHANGED || '' }}
         run: |
           set -euo pipefail
+
+          # Read only: which upstream commit this build carries, and how far the
+          # hourly sync has let it fall behind.
+          git remote add upstream "$UPSTREAM" 2>/dev/null ||
+            git remote set-url upstream "$UPSTREAM"
+          git fetch --no-tags upstream main
+          upstream_sha=$(git rev-parse upstream/main)
+          behind=$(git rev-list --count "HEAD..$upstream_sha")
+
           date=$(date +%Y%m%d)
           base=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           [ -n "$base" ] || { echo '::error::Cargo.toml carries no version.'; exit 1; }
-          # main carries upstream's version, but a dispatch from a daily tag
-          # would hand us a date already, and no one wants 0.1.14-daily.20261126
-          # -daily.20261127.
+          # The branch carries upstream's version, but a dispatch from a daily
+          # tag would hand us a date already, and no one wants
+          # 0.1.14-daily.20261126-daily.20261127.
           base=${base%%-daily.*}
           version="${base}-daily.${date}"
           tag="v${version}"
@@ -176,6 +126,8 @@ jobs:
           echo "published=$published" >> "$GITHUB_OUTPUT"
           echo "create=$create" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
           echo "$reason"
 
           {
@@ -183,11 +135,12 @@ jobs:
             echo ''
             echo "- version: \`$version\`"
             echo "- tag: \`$tag\`"
+            echo "- upstream: \`${upstream_sha:0:7}\` (branch behind by $behind commits)"
             echo "- publish: \`$published\` — $reason"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # The bump is the only content of this commit, and it must not reach main:
-      # main keeps upstream's version so the next merge stays trivial.
+      # The bump is the only content of this commit and it must not reach
+      # `upstream-main`, which has to keep upstream's version for the next merge.
       - name: Tag the build
         id: tag
         if: steps.plan.outputs.create == 'true'
@@ -249,14 +202,14 @@ jobs:
       # attach their files to this release; an empty body from them leaves these
       # notes alone (softprops/action-gh-release keeps the existing body).
       - name: Create the pre-release
-        id: release
         if: steps.plan.outputs.published == 'true'
         env:
           TAG: ${{ steps.plan.outputs.tag }}
           VERSION: ${{ steps.plan.outputs.version }}
+          UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
+          BEHIND: ${{ steps.plan.outputs.behind }}
         run: |
           set -euo pipefail
-          upstream_sha=$(git rev-parse upstream/main)
           previous=$(git tag -l 'v*-daily.*' --sort=-creatordate | head -1 || true)
           if [ -z "$previous" ]; then
             previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-daily.*' 2>/dev/null || true)
@@ -270,7 +223,10 @@ jobs:
             echo '| | |'
             echo '| --- | --- |'
             echo "| 构建版本 version | \`$VERSION\` |"
-            echo "| 上游 upstream | [\`${upstream_sha:0:7}\`](https://github.com/s1dashu/quiet-md/commit/$upstream_sha) |"
+            echo "| 上游 upstream | [\`${UPSTREAM_SHA:0:7}\`](https://github.com/s1dashu/quiet-md/commit/$UPSTREAM_SHA) |"
+            if [ "$BEHIND" != 0 ]; then
+              echo "| 同步延迟 lag | \`upstream-main\` 还差 $BEHIND 个提交，小时级同步下一次会跟上 |"
+            fi
             if [ -n "$previous" ]; then
               echo "| 距上次 since | [\`$previous\`](https://github.com/$REPO/compare/$previous...$TAG) · $count commits |"
             else
@@ -304,7 +260,6 @@ jobs:
             gh release create "$TAG" --verify-tag --prerelease --latest=false \
               --title "Quiet.md $VERSION" --notes-file notes.md
           fi
-          echo "url=https://github.com/$REPO/releases/tag/$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch the builds
         if: steps.plan.outputs.published == 'true'
@@ -340,8 +295,8 @@ jobs:
 
       # Why wait at all: macOS runners are regularly unavailable and the job is
       # then cancelled before it starts (three days running at the time of
-      # writing), which would leave the pre-release without its DMGs. Failures
-      # of the other two mean code, so only macOS is asked again.
+      # writing), which would leave the pre-release without its DMGs. Failures of
+      # the other two mean code, so only macOS is asked again.
       - name: Follow the builds
         env:
           SHA: ${{ needs.publish.outputs.sha }}
