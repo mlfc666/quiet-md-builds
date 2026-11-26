@@ -1,11 +1,14 @@
 name: daily-build
 
-# A pre-release of `upstream-main`, built at the start of every day whether or not upstream
-# tagged a release. sync-upstream keeps that branch level with s1dashu/quiet-md
-# every hour; this workflow turns its tip into a date-stamped pre-release
-# (`v0.1.14-daily.20261126`) carrying the same assets as a stable one, so the
-# newest code is downloadable without waiting for an upstream tag. Stable
-# releases stay where they belong: on main, when upstream tags one.
+# A pre-release of `upstream-main`, built at the start of every day whether or
+# not upstream tagged a release. sync-upstream keeps that branch level with
+# s1dashu/quiet-md every hour; this workflow turns its tip into a date-stamped
+# pre-release (`v0.1.14-daily.20261125`) carrying the same assets as a stable
+# one, so the newest code is downloadable without waiting for an upstream tag.
+# Stable releases stay where they belong: on main, when upstream tags one.
+#
+# The date is the day that just ended: the build at 00:17 on 11-26 carries
+# 11-25's commits, so it is the 20261125 build.
 #
 # The version is bumped in the tag's commit, not on either branch: the version is
 # what About, the installers and the package names show, so a daily has to carry
@@ -30,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Rebuild today''s pre-release even though its tag exists'
+        description: 'Rebuild the day''s pre-release even though its tag exists'
         type: boolean
         default: false
 
@@ -50,8 +53,8 @@ env:
   # or every release call lands on the wrong side (it did once).
   GH_REPO: ${{ github.repository }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  # A build is named after the maintainer's day: 20:17 UTC is 04:17 here, and a
-  # UTC stamp would put yesterday's date on today's build.
+  # The date on a build is a date in the maintainer's day, not UTC's: a run at
+  # 16:17 UTC is 00:17 here, on the next calendar day.
   TZ: Asia/Shanghai
 
 jobs:
@@ -76,7 +79,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-      - name: Plan today's build
+      - name: Plan the build
         id: plan
         env:
           FORCE: ${{ inputs.force || false }}
