@@ -1,0 +1,471 @@
+name: daily-build
+
+# A pre-release of upstream main, built every morning whether or not upstream
+# tagged a release. sync-upstream keeps this branch level with s1dashu/quiet-md
+# every six hours; this workflow turns that into a date-stamped pre-release
+# (`v0.1.14-daily.20261126`) carrying the same assets as a stable one, so the
+# newest code is downloadable without waiting for an upstream tag.
+#
+# The version is bumped in the tag's commit, not on main: the version is what
+# About, the installers and the package names show, so a daily has to carry its
+# date there, but main keeps upstream's version so sync-upstream still merges
+# cleanly and the next upstream release tags as usual.
+#
+# What this workflow does not do, on purpose:
+# - sign or notarize anything (CI cannot),
+# - touch the update manifests (a daily is never served to stable users),
+# - widen who can be tempted to install it: every daily is marked pre-release
+#   and never becomes the repository's "Latest".
+#
+# Quiet days build too — that is also the daily proof that main still compiles.
+# Set the repository variable DAILY_SKIP_UNCHANGED=true to skip instead when
+# upstream has not moved since the previous daily.
+on:
+  schedule:
+    # 20:17 UTC is 04:17 in Asia/Shanghai, between two of sync-upstream's runs.
+    # GitHub's queue is busiest on the hour, hence :17.
+    - cron: '17 20 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild today''s pre-release even though its tag exists'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: daily-build
+  cancel-in-progress: false
+
+env:
+  REPO: ${{ github.repository }}
+  UPSTREAM: https://github.com/s1dashu/quiet-md.git
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # A build is named after the maintainer's day: 20:17 UTC is 04:17 here, and a
+  # UTC stamp would put yesterday's date on today's build.
+  TZ: Asia/Shanghai
+
+jobs:
+  publish:
+    name: tag and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The same lock as sync-upstream, because both push merges of upstream into
+    # main and must not do it at once. Only this short job holds it; the builds
+    # below do not.
+    concurrency:
+      group: sync-upstream
+      cancel-in-progress: false
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      published: ${{ steps.plan.outputs.published }}
+      sha: ${{ steps.tag.outputs.sha || steps.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      # Same merge as sync-upstream, and for the same reasons: this fork only
+      # adds files, so two disjoint change sets cannot conflict, and a future
+      # change that does touch upstream code surfaces as a conflict instead of
+      # a silently dropped patch. Whichever workflow runs first does the merge;
+      # the other finds upstream already contained and does nothing.
+      - name: Merge upstream main
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM" 2>/dev/null ||
+            git remote set-url upstream "$UPSTREAM"
+          git fetch --no-tags upstream main
+          upstream_sha=$(git rev-parse upstream/main)
+          echo "upstream=$upstream_sha"
+
+          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            echo 'main already contains upstream/main.'
+            exit 0
+          fi
+
+          before=$(git rev-parse HEAD)
+          if ! git merge --no-edit "$upstream_sha"; then
+            echo '::error::upstream/main conflicts with this fork; merge it by hand (sync-upstream runs the same merge).'
+            git merge --abort || true
+            exit 1
+          fi
+
+          # GITHUB_TOKEN is a GitHub App token and cannot create or update
+          # files under .github/workflows/, so a merge that brings in an
+          # upstream CI change is rejected at push time. This fork ships its
+          # own workflows; keep them and drop upstream's, exactly as
+          # sync-upstream does.
+          git checkout "$before" -- .github/workflows/
+          # `checkout <tree> -- <dir>` restores the files that existed but keeps
+          # the ones upstream just added, so those have to be dropped by hand.
+          for added in $(git diff --name-only --diff-filter=A "$before" HEAD -- .github/workflows/); do
+            git rm -q -f "$added"
+          done
+          if ! git diff --cached --quiet; then
+            git commit -q -m "ci: keep this fork's workflows (upstream CI is not used here)"
+          fi
+
+          # main only moves under this lock, but a human push could still land
+          # between the fetch and this push; retry on the rarer race instead of
+          # failing a build over it.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo '::error::push to main was rejected three times.'
+              exit 1
+            fi
+            sleep 10
+            git fetch origin main
+            git merge --no-edit origin/main || {
+              echo '::error::main moved and now conflicts with the upstream merge.'
+              exit 1
+            }
+          done
+
+      - name: Plan today's build
+        id: plan
+        env:
+          FORCE: ${{ inputs.force || false }}
+          SKIP_UNCHANGED: ${{ vars.DAILY_SKIP_UNCHANGED || '' }}
+        run: |
+          set -euo pipefail
+          date=$(date +%Y%m%d)
+          base=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          [ -n "$base" ] || { echo '::error::Cargo.toml carries no version.'; exit 1; }
+          # main carries upstream's version, but a dispatch from a daily tag
+          # would hand us a date already, and no one wants 0.1.14-daily.20261126
+          # -daily.20261127.
+          base=${base%%-daily.*}
+          version="${base}-daily.${date}"
+          tag="v${version}"
+          last=$(git tag -l 'v*-daily.*' --sort=-creatordate | head -1 || true)
+
+          published=false
+          create=false
+          sha=''
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            sha=$(git rev-parse "$tag^{commit}")
+            if [ "$FORCE" = true ]; then
+              published=true
+              reason="$tag exists already; rebuilding on request"
+            else
+              reason="$tag exists already; nothing to do (dispatch with force to rebuild)"
+            fi
+          elif [ "$SKIP_UNCHANGED" = true ] && [ -n "$last" ] && [ "$(git rev-list --count "$last..HEAD")" = 0 ]; then
+            reason="upstream has not moved since $last"
+          else
+            published=true
+            create=true
+            reason="new build for $date"
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+          echo "create=$create" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "$reason"
+
+          {
+            echo '### 每日构建 · daily build'
+            echo ''
+            echo "- version: \`$version\`"
+            echo "- tag: \`$tag\`"
+            echo "- publish: \`$published\` — $reason"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The bump is the only content of this commit, and it must not reach main:
+      # main keeps upstream's version so the next merge stays trivial.
+      - name: Tag the build
+        id: tag
+        if: steps.plan.outputs.create == 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 - "$VERSION" <<'PY'
+          import re, sys
+
+          new_version = sys.argv[1]
+
+          # Cargo.toml: only the [package] version, which is the first
+          # `version = "..."` line; the rest belong to dependencies.
+          text = open('Cargo.toml', encoding='utf-8').read()
+          m = re.search(r'^version = "[^"]*"', text, re.M)
+          if not m:
+              sys.exit('no package version in Cargo.toml')
+          text = text[:m.start()] + f'version = "{new_version}"' + text[m.end():]
+          open('Cargo.toml', 'w', encoding='utf-8', newline='').write(text)
+
+          # Cargo.lock records the root package's version, and every build runs
+          # `--locked`: a bump without this line fails all six builds with "the
+          # lock file needs to be updated" instead of here, in seconds.
+          lock = open('Cargo.lock', encoding='utf-8').read()
+          blocks = lock.split('[[package]]')
+          patched = 0
+          for i, block in enumerate(blocks):
+              if not re.search(r'^name = "quiet_md"$', block, re.M):
+                  continue
+              blocks[i], n = re.subn(r'(^version = )"[^"]*"', rf'\g<1>"{new_version}"',
+                                     block, count=1, flags=re.M)
+              patched += n
+          if patched != 1:
+              sys.exit(f'expected one Cargo.lock entry for quiet_md, patched {patched}')
+          open('Cargo.lock', 'w', encoding='utf-8', newline='').write('[[package]]'.join(blocks))
+          print(f'version {new_version}')
+          PY
+
+          # Proves the two files agree; `cargo metadata` never downloads a crate.
+          cargo metadata --locked --format-version 1 > /dev/null
+
+          extra=$(git diff --name-only | grep -vx -e Cargo.toml -e Cargo.lock || true)
+          if [ -n "$extra" ]; then
+            echo "::error::the version bump touched files it should not have: $extra"
+            git diff --stat
+            exit 1
+          fi
+
+          git add Cargo.toml Cargo.lock
+          git commit -q -m "build: daily $VERSION of $(git rev-parse --short HEAD)"
+          git tag -a "$TAG" -m "Quiet.md $VERSION (daily build of upstream main)"
+          git push origin "refs/tags/$TAG"
+          echo "sha=$(git rev-parse "$TAG^{commit}")" >> "$GITHUB_OUTPUT"
+
+      # Created here rather than left to the first build that finishes, so the
+      # notes are written once and no build has to guess them. The builds then
+      # attach their files to this release; an empty body from them leaves these
+      # notes alone (softprops/action-gh-release keeps the existing body).
+      - name: Create the pre-release
+        id: release
+        if: steps.plan.outputs.published == 'true'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          upstream_sha=$(git rev-parse upstream/main)
+          previous=$(git tag -l 'v*-daily.*' --sort=-creatordate | head -1 || true)
+          if [ -z "$previous" ]; then
+            previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-daily.*' 2>/dev/null || true)
+          fi
+          range=${previous:-$(git rev-list --max-parents=0 HEAD | tail -1)}
+          count=$(git rev-list --count "$range..HEAD")
+
+          {
+            echo '## 每日构建 · daily build'
+            echo ''
+            echo '| | |'
+            echo '| --- | --- |'
+            echo "| 构建版本 version | \`$VERSION\` |"
+            echo "| 上游 upstream | [\`${upstream_sha:0:7}\`](https://github.com/s1dashu/quiet-md/commit/$upstream_sha) |"
+            if [ -n "$previous" ]; then
+              echo "| 距上次 since | [\`$previous\`](https://github.com/$REPO/compare/$previous...$TAG) · $count commits |"
+            else
+              echo "| 距上次 since | the first daily build |"
+            fi
+            echo "| 构建时间 built | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo ''
+            echo '### 变更 · changes'
+            echo ''
+            if [ "$count" -gt 0 ]; then
+              git log --no-merges --pretty='- %s (`%h`)' "$range..HEAD" | head -40 || true
+              if [ "$count" -gt 40 ]; then
+                echo "- … 其余 $((count - 40)) 条见提交历史 · $count in total"
+              fi
+            else
+              echo '- 上游自上次构建以来没有新提交 · no new upstream commits since the last build'
+            fi
+            echo ''
+            echo '> **这是自动构建的每日预览版，不是正式发布。**'
+            echo '>'
+            echo '> - macOS 包为 ad-hoc 签名、未公证：首次打开请右键 →「打开」。'
+            echo '> - Windows 安装包、Linux 各包均未签名、未公证。'
+            echo '> - 应用内自动更新不适用于每日构建，升级请直接下载最新的一次构建。'
+            echo '> - 三个平台并行构建，产物在 20–40 分钟内陆续上传到这里。'
+            echo '> - 只保留最近 14 天的每日构建，更早的会被删除。'
+          } > notes.md
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --prerelease --latest=false --title "Quiet.md $VERSION" --notes-file notes.md
+          else
+            gh release create "$TAG" --verify-tag --prerelease --latest=false \
+              --title "Quiet.md $VERSION" --notes-file notes.md
+          fi
+          echo "url=https://github.com/$REPO/releases/tag/$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the builds
+        if: steps.plan.outputs.published == 'true'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -uo pipefail
+          failed=0
+          # A push made with GITHUB_TOKEN does not start a `push: tags` workflow,
+          # so the builds have to be asked for on the tag explicitly — the same
+          # reason sync-upstream dispatches its own.
+          for wf in build-linux build-macos build-windows; do
+            if gh workflow run "$wf.yml" --ref "$TAG"; then
+              echo "  $wf requested"
+            else
+              echo "::error::$wf could not be dispatched on $TAG."
+              failed=1
+            fi
+          done
+          exit $failed
+
+  follow:
+    name: wait for the builds
+    needs: publish
+    if: needs.publish.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Why wait at all: macOS runners are regularly unavailable and the job is
+      # then cancelled before it starts (three days running at the time of
+      # writing), which would leave the pre-release without its DMGs. Failures
+      # of the other two mean code, so only macOS is asked again.
+      - name: Follow the builds
+        env:
+          SHA: ${{ needs.publish.outputs.sha }}
+          TAG: ${{ needs.publish.outputs.tag }}
+        run: |
+          set -uo pipefail
+          work=$(mktemp -d)
+          state="$work/state"
+          results="$work/results"
+          : > "$state"
+          : > "$results"
+          failed=0
+
+          # `< /dev/null`: these run inside a `while read` over the state file, and
+          # anything that touches stdin would eat the lines still to be read.
+          newest_run() { # $1 = workflow file name
+            gh run list --workflow "$1.yml" --limit 30 --json databaseId,headSha \
+              --jq "[.[] | select(.headSha == \"$SHA\")][0].databaseId // empty" \
+              < /dev/null 2>/dev/null
+          }
+          conclude() { # $1 = run id; empty while the run is still going
+            gh run view "$1" --json status,conclusion \
+              --jq 'if .status == "completed" then (.conclusion // "unknown") else "" end' \
+              < /dev/null 2>/dev/null
+          }
+
+          for wf in build-linux build-macos build-windows; do
+            if id=$(newest_run "$wf") && [ -n "$id" ]; then
+              echo "$wf $id 1" >> "$state"
+              echo "following $wf (run $id)"
+            else
+              echo "::error::$wf has no run for $SHA."
+              failed=1
+            fi
+          done
+
+          deadline=$((SECONDS + 55 * 60))
+          while [ -s "$state" ]; do
+            pending=0
+            : > "$work/next"
+            while read -r wf id attempts; do
+              conclusion=$(conclude "$id")
+              if [ -z "$conclusion" ]; then
+                echo "$wf $id $attempts" >> "$work/next"
+                pending=1
+                continue
+              fi
+              if [ "$conclusion" != success ] && [ "$wf" = build-macos ] && [ "$attempts" -lt 3 ]; then
+                echo "::warning::$wf ended $conclusion; asking for it again (attempt $((attempts + 1)))"
+                sleep 30
+                redispatched=0
+                if gh workflow run "$wf.yml" --ref "$TAG" < /dev/null; then
+                  for _ in $(seq 1 24); do
+                    new=$(newest_run "$wf")
+                    if [ -n "$new" ] && [ "$new" != "$id" ]; then
+                      echo "$wf $new $((attempts + 1))" >> "$work/next"
+                      redispatched=1
+                      pending=1
+                      break
+                    fi
+                    sleep 5
+                  done
+                fi
+                if [ "$redispatched" = 1 ]; then
+                  continue
+                fi
+                echo "::warning::$wf was dispatched again but no new run appeared; keeping this result."
+              fi
+              echo "$wf $conclusion" >> "$results"
+            done < "$state"
+            mv "$work/next" "$state"
+            [ "$pending" = 0 ] && break
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo '::warning::stopped waiting after 55 minutes; see the run list.'
+              break
+            fi
+            sleep 45
+          done
+
+          {
+            echo ''
+            echo '### Builds'
+            echo ''
+            echo '| workflow | result |'
+            echo '| --- | --- |'
+            while read -r wf conclusion; do
+              echo "| $wf | $conclusion |"
+            done < "$results"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          while read -r wf conclusion; do
+            if [ "$conclusion" != success ]; then
+              echo "::error::$wf finished $conclusion."
+              failed=1
+            fi
+          done < "$results"
+          exit $failed
+
+      # A rolling channel: the newest two weeks stay downloadable, the rest are
+      # noise on the Releases page. Only date-stamped pre-releases are touched.
+      - name: Prune old daily releases
+        run: |
+          set -uo pipefail
+          keep=14
+          gh release list --limit 200 --json tagName,createdAt,isPrerelease \
+            > "$RUNNER_TEMP/releases.json"
+          python3 - "$RUNNER_TEMP/releases.json" "$keep" > "$RUNNER_TEMP/prune.txt" <<'PY'
+          import json, re, sys
+
+          with open(sys.argv[1], encoding='utf-8') as f:
+              releases = json.load(f)
+          daily = re.compile(r'^v\d+\.\d+\.\d+-daily\.\d{8}$')
+          rows = [r for r in releases if r.get('isPrerelease') and daily.match(r['tagName'])]
+          rows.sort(key=lambda r: r['createdAt'], reverse=True)
+          for r in rows[int(sys.argv[2]):]:
+              print(r['tagName'])
+          PY
+          if [ ! -s "$RUNNER_TEMP/prune.txt" ]; then
+            echo 'nothing to prune.'
+            exit 0
+          fi
+          while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "removing $tag"
+            gh release delete "$tag" --yes || true
+            git push origin ":refs/tags/$tag" || true
+          done < "$RUNNER_TEMP/prune.txt"

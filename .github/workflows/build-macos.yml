@@ -6,6 +6,14 @@ name: build-macos
 # Developer ID certificate.
 on:
   workflow_dispatch:
+    inputs:
+      # daily-build dispatches these on a date-stamped tag. Without this the
+      # release would look like a stable one: a pre-release may not claim the
+      # "Latest" badge, and GitHub refuses `make_latest: true` for one.
+      prerelease:
+        description: 'Attach the files to a pre-release (daily build)'
+        type: boolean
+        default: false
   push:
     tags: ['v*']
   pull_request:
@@ -71,6 +79,9 @@ jobs:
         with:
           files: artifacts/*
           fail_on_unmatched_files: false
-          # Re-running one architecture must not fail on the files the other
-          # architecture already uploaded.
+          # `inputs` is empty on a tag push, so a stable release stays one.
+          prerelease: ${{ inputs.prerelease || false }}
+          make_latest: ${{ inputs.prerelease && 'false' || 'legacy' }}
+          # A daily build re-runs the same tag when a runner was unavailable, so
+          # replacing the files an earlier run uploaded has to be allowed.
           overwrite_files: true

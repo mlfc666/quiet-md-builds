@@ -94,6 +94,12 @@ jobs:
           set -euo pipefail
           before=${{ steps.merge.outputs.before }}
           git checkout "$before" -- .github/workflows/
+          # `checkout <tree> -- <dir>` restores the files that existed but keeps
+          # the ones upstream just added, and a push that creates a workflow file
+          # is rejected outright, so those have to go by hand.
+          for added in $(git diff --name-only --diff-filter=A "$before" HEAD -- .github/workflows/); do
+            git rm -q -f "$added"
+          done
           if git diff --cached --quiet; then
             echo "No upstream workflow changes to drop."
           else
