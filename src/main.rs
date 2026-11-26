@@ -25,6 +25,7 @@ mod devtools {
     pub static RENDER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     pub fn scripted() -> bool { crate::selftest::active() }
     pub fn start(_: &mut gpui::Window, _: &mut gpui::App) {}
+    pub fn opened(_: &mut gpui::Window, _: &mut gpui::App) {}
     pub fn take_pick() -> Option<Vec<std::path::PathBuf>> { None }
     pub fn file_drag() -> bool { false }
     pub fn rows_begin(_: &gpui::Window) {}
@@ -42,6 +43,7 @@ mod html;
 mod input;
 mod logging;
 mod modes;
+mod typewriter;
 mod import_sources;
 mod onboarding;
 #[cfg(target_os = "macos")]
@@ -51,6 +53,7 @@ mod native_header;
 mod native_header;
 mod mermaid;
 mod on_top;
+mod focus;
 mod printing;
 mod search;
 mod siyuan;
@@ -247,7 +250,7 @@ fn main() {
     let root = store::Store::legacy_dir();
     let fixed = std::env::var_os("QUIET_MD_HOME").is_some();
     logging::write(&format!("library {}", root.display()));
-    // 主页: a folders.json (even an empty one: every folder removed) or the
+    // The top-level folders: a folders.json (even an empty one: every folder removed) or the
     // library builds before it used means this computer has been here
     // before, and can show 更新日志.
     let existed = (!fixed && fdl_core::vfs::PathExt::fs_exists(fdl_core::home::Home::list_file().as_path())) || guides::seeded(&root).unwrap_or(false);

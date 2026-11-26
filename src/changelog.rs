@@ -184,7 +184,7 @@ pub fn card(on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> 
             .child(Button::ghost("changelog-close").icon("x").sized(ButtonSize::Xs)
                 .on_click(move |e, w, cx| { PENDING.store(false, Ordering::Relaxed); *MIGRATED.lock().unwrap() = None; on_close(e, w, cx); })))
         .child(div().relative().flex_1().min_h_0().flex().flex_col()
-            .child(div().id("changelog-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).child(list).child(crate::design::scroll::bar("changelog-list", &scroll, 0.)))
+            .child(crate::design::scroll::make_room(div().id("changelog-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll), "changelog-list", 0.).child(list).child(crate::design::scroll::bar("changelog-list", &scroll, 0.)))
             // A line cut by the card's bottom edge fades out instead; gone once the list is at its end.
             .when(more, |d| d.child(div().absolute().left_0().right_0().bottom_0().h(px(24.))
                 .bg(linear_gradient(180., linear_color_stop(face.opacity(0.), 0.), linear_color_stop(face, 1.))))))

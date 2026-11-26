@@ -6,13 +6,13 @@ use crate::app::{Confirm, ConfirmCancel, ConfirmOk, Workspace};
 use crate::settings::display_title;
 use crate::search::doc_icon;
 use crate::store::{TRASH_DAYS, TrashEntry};
-pub(crate) use crate::ui::{ToastKind, list_header_text, list_line, row_hover};
+pub(crate) use crate::ui::{ToastKind, list_header_text, row_hover, row_line};
 use crate::design::{Button, ButtonSize, Checkbox, Dialog};
 use crate::theme::{self, Theme};
 use crate::ui::{ROW_RADIUS, TipExt, TitleBarExt, icon, ui_text};
 use gpui::{prelude::FluentBuilder, *};
 
-pub const TRASH_MENU_W: f32 = 160.;
+pub const TRASH_MENU_W: f32 = crate::design::menu_w::SM;
 
 struct ListedTrash { lists: Vec<(String, Vec<TrashEntry>)>, warnings: Vec<String> }
 struct PurgedTrash { errors: Vec<String> }
@@ -119,6 +119,11 @@ impl Workspace {
                 .text_color(list_header_text())
                 .child(crate::settings::label(label))
         };
+        // A row is lit while hovered or holding its menu; the lines touching it hide.
+        let lit = |i: usize| self.trash.get(i).is_some_and(|t| {
+            self.home.list_hover.as_ref().is_some_and(|h| *h == format!("trash-row-{}", t.id))
+                || self.trash_menu.as_ref().is_some_and(|(m, _, _)| *m == t.id)
+        });
         let table_header = div()
             .h(px(33.))
             .flex_none()
@@ -126,7 +131,7 @@ impl Workspace {
             .flex()
             .items_center()
             .border_b_1()
-            .border_color(list_line())
+            .border_color(row_line(lit(0)))
             .child(col(None, "标题"))
             .child(col(Some(168.), "位置"))
             .child(col(Some(168.), "剩余时间"))
@@ -152,15 +157,17 @@ impl Workspace {
                     w.trash_menu = Some((id.clone(), pos, corner));
                     cx.notify();
                 }));
+            let key = SharedString::from(format!("trash-row-{}", t.id));
             list = list.child(
                 div()
-                    .id(SharedString::from(format!("trash-row-{}", t.id)))
+                    .id(key.clone())
                     .h(px(56.))
                     .flex()
                     .items_center()
-                    .when(i > 0, |d| d.border_t_1().border_color(list_line()))
+                    .when(i > 0, |d| d.border_t_1().border_color(row_line(lit(i - 1) || lit(i))))
                     .hover(row_hover)
-                    .when(menu_open, |d| d.bg(Theme::fill_hover()).border_color(transparent_black()).rounded(px(ROW_RADIUS)))
+                    .on_hover(cx.listener(move |w, on: &bool, _, cx| if w.home.hover_row(&key, *on) { cx.notify() }))
+                    .when(menu_open, |d| d.bg(Theme::fill_hover()).rounded(px(ROW_RADIUS)))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
@@ -189,7 +196,7 @@ impl Workspace {
                             .flex()
                             .items_center()
                             .gap(px(4.))
-                            .child(icon("library", 16., Theme::icon()))
+                            .child(icon("folder", 16., Theme::icon()))
                             .child(div().min_w_0().text_size(px(13.)).text_color(Theme::text_caption()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(self.trash_location(t)))),
                     )
                     .child(div().w(px(168.)).flex_none().pl(px(20.)).text_size(px(13.)).text_color(Theme::text_caption()).child(remaining(t.deleted)))
@@ -208,7 +215,7 @@ impl Workspace {
             .menu()
             // At least TRASH_MENU_W, wider when a label needs it (English
             // "Delete permanently" ran into the edge).
-            .min_w(px(TRASH_MENU_W))
+            .w(px(TRASH_MENU_W))
             .on_mouse_down_out(cx.listener(|w, _, _, cx| {
                 w.trash_menu = None;
                 cx.notify();

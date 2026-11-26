@@ -326,7 +326,7 @@ fn cond_controls(t: &Table, kind: Kind, i: usize, c: &Cond, panel: &Panel, field
 fn field_list(t: &Table, view: &View, panel: &Panel, room: f32, cx: &Context<TableView>) -> AnyElement {
     let query = panel.search.as_ref().map(|(e, _)| e.read(cx).text.trim().to_lowercase()).unwrap_or_default();
     let primary = t.fields.first().map(|f| f.id);
-    let mut list = div().id("tb-pl-list").max_h(px(420.)).overflow_y_scroll().track_scroll(&crate::design::scroll::handle("tb-pl-list")).flex().flex_col()
+    let mut list = crate::design::scroll::make_room(div().id("tb-pl-list").max_h(px(420.)).overflow_y_scroll().track_scroll(&crate::design::scroll::handle("tb-pl-list")).flex().flex_col(), "tb-pl-list", crate::design::menu::PAD)
         // let go anywhere over the list: where the gap is
         .on_drop(cx.listener(|v, d: &FieldDrag, _, cx| {
             let to = panel_mut(v).and_then(|p| p.drop_at.take()).filter(|(id, _)| *id == d.id).map(|(_, to)| to);
@@ -483,7 +483,7 @@ fn order_panel(t: &Table, view: &View, kind: Kind, room: f32, cx: &Context<Table
 fn height_panel(view: &View, room: f32, cx: &Context<TableView>) -> AnyElement {
     let cur = view.opts.row_height;
     // the menu's heading, not one of its rows: shadcn's DropdownMenuLabel (text-xs, muted)
-    let mut p = shell("tb-panel-height", 140., room, cx).py(px(8.)).child(crate::design::MenuLabel::new(label("设置行高")));
+    let mut p = shell("tb-panel-height", crate::design::menu_w::SM, room, cx).py(px(8.)).child(crate::design::MenuLabel::new(label("设置行高")));
     for (i, h) in RowHeight::ALL.iter().copied().enumerate() {
         p = p.child(menu_item(("tb-ph", i), "", label(h.label()), false).when(h == cur, |d| d.text_color(crate::design::color::foreground()).child(icon("check", 14., crate::design::color::foreground())))
             .on_click(cx.listener(move |v, _, window, cx| { v.edit_view(cx, |view| view.opts.row_height = h); v.close_popup(window, cx); })));

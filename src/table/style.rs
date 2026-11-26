@@ -39,6 +39,8 @@ impl Theme {
 /// The row's start (as 飞书's 多维表格): its number in the rows shown, a checkbox in its place while the
 /// row is hovered or ticked, the handle before it and 展开 after it on hover.
 pub const GUTTER_W: f32 = 56.;
+/// The table page's sheet's corners (squircle), which the grid's scroll thumbs keep clear of.
+pub const SHEET_R: f32 = crate::design::R + 4.;
 /// Field header row (Vega's table head, h-10).
 pub fn header_h() -> f32 { geo().table_head }
 /// A row's height: the view's choice, the two short ones Vega's (36 / 44).
@@ -96,8 +98,10 @@ pub fn range_bg() -> Hsla { color::muted() }
 pub fn star() -> Hsla { crate::theme::c(crate::theme::craft::O350) }
 // 查找's hits and the current one: 飞书多维表格's two yellows, as the first 数据表 took them (4cf23b9).
 // The design system has no highlight token yet; these stay until it does.
-pub fn found_bg() -> Hsla { crate::theme::c(0xfff5c2) }
-pub fn found_current() -> Hsla { crate::theme::c(0xffd666) }
+// In the dark both are the yellow as a dim tint under the page's ink (`theme::mark`), the current
+// one the stronger: mirrored, the current one stayed a bright yellow under white text (1.5:1).
+pub fn found_bg() -> Hsla { if crate::theme::dark() { crate::theme::mark(crate::theme::rgbaf(0xff, 0xd6, 0x66, 0.35)) } else { crate::theme::c(0xfff5c2) } }
+pub fn found_current() -> Hsla { if crate::theme::dark() { crate::theme::mark(crate::theme::rgbaf(0xff, 0xd6, 0x66, 1.)) } else { crate::theme::c(0xffd666) } }
 
 /// Slots 10–19: 飞书's deeper row, (fill, text): 飞书多维表格's option palette as files store its
 /// slots (4cf23b9). The design system's chips cover the first ten only, so these keep their values.

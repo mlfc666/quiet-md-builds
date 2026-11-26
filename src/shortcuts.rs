@@ -212,8 +212,8 @@ fn info(name: &str) -> Option<(usize, &'static str, &'static str)> {
         "Minimize" => (0, "最小化窗口", "Minimize window"),
         "ToggleFullScreen" => (0, "进入 / 退出全屏", "Enter / exit full screen"),
         "OpenSettings" => (0, "打开设置", "Open Settings"),
-        "GoHome" => (0, "返回主页", "Go to Home"),
         "ToggleSidebar" => (0, "展开 / 收起侧栏", "Show / hide sidebar"),
+        "ToggleFocus" => (1, "进入 / 退出专注模式", "Enter / exit Focus Mode"),
         "ToggleDarkMode" => (0, "切换深色 / 浅色", "Toggle dark mode"),
         "FocusSearch" => (0, "搜索文档", "Search documents"),
         "ToggleShortcuts" => (0, "查看快捷键", "Show shortcuts"),
@@ -223,6 +223,7 @@ fn info(name: &str) -> Option<(usize, &'static str, &'static str)> {
         "Save" => (1, "保存文档", "Save document"),
         "EditMode" => (1, "编辑模式", "Edit mode"),
         "ReadMode" => (1, "阅读模式", "Reading mode"),
+        "ToggleTypewriter" => (1, "打字机模式", "Typewriter mode"),
         "FindInDoc" => (1, "文档内查找", "Find in document"),
         "ReplaceInDoc" => (1, "查找和替换", "Find and replace"),
         "Undo" => (2, "撤销", "Undo"),
@@ -545,7 +546,7 @@ impl Workspace {
             ]))
             .when(global_rec || last_rec, |d| d.child(self.shortcut_recorder(cx)))
             .children(global_err.map(|e| div().px(px(4.)).text_size(px(12.)).line_height(px(18.)).text_color(Theme::danger()).child(e)));
-        div().w_full().flex().flex_col().gap(px(28.))
+        div().w_full().flex().flex_col().gap(px(crate::design::geo().section_gap))
             .children(general_error.map(|e| div().px(px(4.)).text_size(px(12.)).line_height(px(18.)).text_color(Theme::danger()).child(e)))
             .when(show_global, |d| d.child(global_group))
             .when(empty, |d| d.child(div().py(px(40.)).flex().justify_center().text_size(px(13.)).text_color(Theme::text_caption()).child(tr("没有匹配的快捷键", "No matching shortcuts"))))

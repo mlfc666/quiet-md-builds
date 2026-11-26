@@ -430,7 +430,8 @@ impl Workspace {
     /// [`Self::search_results`] as indices into `entries`.
     fn search_rows(&self, q: &str) -> Vec<usize> {
         if q.is_empty() {
-            let mut recent: Vec<usize> = (0..self.entries.len()).filter(|&i| self.entries[i].note.is_none()).collect();
+            // An attachment opened in its own window belongs to its page, not to 最近浏览.
+            let mut recent: Vec<usize> = (0..self.entries.len()).filter(|&i| self.entries[i].note.is_none() && !self.entries[i].meta.attachment()).collect();
             recent.sort_by_key(|&i| std::cmp::Reverse(self.entries[i].meta.opened.max(self.entries[i].meta.modified)));
             recent.truncate(RECENT);
             return recent;
@@ -551,6 +552,8 @@ impl Workspace {
             .flex_col()
             .overflow_y_scroll()
             .track_scroll(&self.search_scroll);
+        // the rows keep 6 from the side: while the list scrolls, the scrollbar's lane beside them
+        list = self.home.search_scrollbar.make_room(list, 6.);
         if q.is_empty() && !results.is_empty() {
             list = list.child(
                 div()
@@ -635,7 +638,7 @@ impl Workspace {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(input)
             .child(Separator::new())
-            // The thumb sits in the list's right padding, over no row.
+            // The thumb sits in the list's right padding (`make_room`), over no row.
             .child(div().flex_1().min_h_0().relative().flex().flex_col().child(list).child(self.home.search_scrollbar.render(&self.search_scroll)))
             .child(footer);
 

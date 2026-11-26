@@ -9,11 +9,14 @@
 //!   activate (make the window key; takes focus) | quit |
 //!   pick <path>[|<path>...] (answers the next file dialog instead of showing it)
 //!   row <title> | rrow <title> | hoverrow <title> (click, right-click or hover the sidebar row
-//!   with that title: 主页, 我的文档, a document or folder, 设置, a page in 设置's list…, or
+//!   with that title: 我的文档, a document or folder, 设置, a page in 设置's list…, or
 //!   the menu item (`design::MenuItem`: the + menu's 画板, a board's right-click menu); the
 //!   topmost if several; no row shown by that title ends the run with exit code 3) |
 //!   anchor <name> (click the middle of a tracked control, e.g. `create-sidebar`: 我的文档's "+",
 //!   `doc-font-picker` / `ui-font-picker`: 外观's font lists, `font-del-<id>`: a downloaded font's delete) |
+//!   window <n> (the steps after it play in the n-th window, 0 the main one, in the order they opened) |
+//!   windows <n> (that many windows are open; else the run ends with exit code 3) |
+//!   caret (logs `caret <y> of <height>`: the caret line's middle on the page) |
 //!   showing <title> (the document or folder page in front has that title; else the run ends with exit code 3) |
 //!   origin board | origin window (the points of the mouse and file steps after it count from the open
 //!   画板's top-left corner, or again from the window's; no board open ends the run with exit code 3)
@@ -30,6 +33,7 @@
 //!   goes to `<file>.cursor` for compositing those in afterwards.
 
 mod priority;
+mod board_reload;
 
 use gpui::*;
 use std::sync::Mutex;
@@ -83,6 +87,8 @@ fn ease(t: f32) -> f32 {
 }
 
 thread_local! { static CURRENT: std::cell::Cell<Option<(AnyWindowHandle, usize)>> = const { std::cell::Cell::new(None) }; }
+// The main window (`window 0`).
+thread_local! { static MAIN: std::cell::Cell<Option<(AnyWindowHandle, usize)>> = const { std::cell::Cell::new(None) }; }
 /// The recording under way: its start, and where its frames go.
 type Frames = std::sync::mpsc::Sender<(f64, usize, usize, Vec<u8>)>;
 thread_local! { static RECORDING: std::cell::RefCell<Option<(Instant, Frames)>> = const { std::cell::RefCell::new(None) }; }
@@ -103,6 +109,29 @@ async fn park(ns_view: usize, cx: &mut AsyncApp) {
     }
 }
 
+thread_local! { static WINDOWS: std::cell::RefCell<Vec<(AnyWindowHandle, usize)>> = const { std::cell::RefCell::new(Vec::new()) }; }
+
+/// A window opened beside the main one during a scripted run (a document's
+/// own window): parked like it, and reachable with `window <n>`.
+pub fn opened(window: &mut Window, cx: &mut App) {
+    if std::env::var_os("FDL_SCRIPT").is_none() { return }
+    #[cfg(target_os = "macos")]
+    let Some(ns_view) = ns_view_of(window) else { return };
+    #[cfg(not(target_os = "macos"))]
+    let ns_view = 0usize;
+    WINDOWS.with(|w| w.borrow_mut().push((window.window_handle(), ns_view)));
+    cx.spawn(async move |cx| park(ns_view, cx).await).detach();
+}
+
+/// The windows a script can play in, those closed since left out: the main one first.
+fn script_windows(main: (AnyWindowHandle, usize), cx: &mut AsyncApp) -> Vec<(AnyWindowHandle, usize)> {
+    let open: Vec<AnyWindowHandle> = cx.update(|cx| cx.windows());
+    WINDOWS.with(|w| {
+        w.borrow_mut().retain(|(h, _)| open.contains(h));
+        std::iter::once(main).chain(w.borrow().iter().copied().filter(|(h, _)| *h != main.0)).collect()
+    })
+}
+
 pub fn start(window: &mut Window, cx: &mut App) {
     let Ok(path) = std::env::var("FDL_SCRIPT") else { return };
     let Ok(script) = std::fs::read_to_string(&path) else {
@@ -119,6 +148,7 @@ pub fn start(window: &mut Window, cx: &mut App) {
     // One script per run: a window opened later (first launch's pages hand
     // over to the main window) becomes where the rest of it plays.
     CURRENT.with(|c| c.set(Some((handle, ns_view))));
+    MAIN.with(|c| c.set(Some((handle, ns_view))));
     if RUNNING.swap(true, std::sync::atomic::Ordering::Relaxed) {
         cx.spawn(async move |cx| park(ns_view, cx).await).detach();
         return;
@@ -176,6 +206,21 @@ pub fn start(window: &mut Window, cx: &mut App) {
                         Err(e) => { eprintln!("devtools: origin: {e}"); std::process::exit(3); }
                     }
                 }
+                // `window <n>`: play in that window from here on; `windows <n>`: that many are open.
+                "window" | "windows" => {
+                    let all = match MAIN.with(|c| c.get()) { Some(main) => script_windows(main, cx), None => vec![] };
+                    let n: usize = rest.trim().parse().unwrap_or(usize::MAX);
+                    if cmd == "windows" && all.len() == n { eprintln!("devtools: windows {n}"); continue }
+                    if cmd == "window" && let Some(w) = all.get(n) {
+                        CURRENT.with(|c| c.set(Some(*w)));
+                        // Let it draw once before the steps that follow.
+                        let _ = w.0.update(cx, |_, window, cx| { window.refresh(); window.draw(cx).clear(cx); });
+                        eprintln!("devtools: window {n}");
+                        continue
+                    }
+                    eprintln!("devtools: {cmd}: wanted {}, {} open", rest.trim(), all.len());
+                    std::process::exit(3);
+                }
                 // `showing <title>`: the document (or folder page) in front has that title; else stop as `row` does.
                 "showing" => {
                     let want = rest.trim();
@@ -188,6 +233,15 @@ pub fn start(window: &mut Window, cx: &mut App) {
                     if shown.as_deref() == Some(want) { eprintln!("devtools: showing {want:?}"); continue }
                     eprintln!("devtools: showing: wanted {want:?}, in front: {shown:?}");
                     std::process::exit(3);
+                }
+                // `caret`: logs where the caret's line sits on the page (`caret <y> of <height>`).
+                "caret" => {
+                    let at = handle.update(cx, |root, _, cx| {
+                        let ws = root.downcast::<crate::app::Workspace>().ok()?;
+                        ws.read(cx).editor.as_ref()?.read(cx).caret_probe()
+                    }).ok().flatten();
+                    match at { Some((y, h)) => eprintln!("devtools: caret {y:.1} of {h:.1}"), None => eprintln!("devtools: caret none") }
+                    continue
                 }
                 _ => { resolved = shifted(cmd, rest); (cmd, resolved.as_str()) }
             };
@@ -413,6 +467,11 @@ pub fn start(window: &mut Window, cx: &mut App) {
             if cmd == "check-priority" {
                 let ws = handle.downcast::<crate::app::Workspace>().unwrap();
                 ws.update(cx, |ws, window, cx| priority::step(rest, ws, window, cx)).unwrap();
+                continue;
+            }
+            if cmd == "check-board-reload" {
+                let ws = handle.downcast::<crate::app::Workspace>().unwrap();
+                ws.update(cx, |ws, window, cx| board_reload::step(rest, ws, window, cx)).unwrap();
                 continue;
             }
             if cmd == "check-save-safety" {
