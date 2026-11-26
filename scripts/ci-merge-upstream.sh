@@ -11,11 +11,12 @@
 # disjoint and cannot conflict. A future change that does touch upstream code
 # surfaces as a conflict instead of a silently dropped patch.
 #
-# Why this fork's `.github/workflows/` always wins: GITHUB_TOKEN is a GitHub App
-# token and GitHub rejects a push that creates or updates a workflow file with
-# it, so an upstream CI change cannot be carried over even when it merges
-# cleanly. `checkout <tree> -- <dir>` restores the files that existed but keeps
-# the ones upstream just added, hence the second loop.
+# Why `.github/workflows/` always comes from `main`, whatever the target branch:
+# GITHUB_TOKEN is a GitHub App token and GitHub rejects a push that creates or
+# updates a workflow file with it, so upstream's CI cannot be carried over even
+# when it merges cleanly; and a branch that kept its own copy of the workflows
+# would go stale the moment main's are edited, leaving daily tags built by an
+# old build script. `main` is the one place these files are edited.
 #
 # Prints `updated=true` or `updated=false` as its last line.
 set -euo pipefail
@@ -26,6 +27,7 @@ ref=${2:?usage: ci-merge-upstream.sh <branch> <upstream-ref> [<base-ref>]}
 base=${3:-}
 
 git fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
+git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || true
 
 exists=false
 if git rev-parse -q --verify "refs/remotes/origin/$branch" > /dev/null; then
@@ -40,33 +42,36 @@ else
 fi
 
 git checkout -q -B "$branch" "$start"
+before=$(git rev-parse HEAD)
 
 if git merge-base --is-ancestor "$ref" HEAD; then
   echo "$branch already contains $ref."
-  if [ "$exists" = true ]; then
-    echo 'updated=false'
-    exit 0
+else
+  if ! git merge --no-edit "$ref"; then
+    echo "::error::$ref conflicts with this fork; merge it by hand." >&2
+    git merge --abort || true
+    exit 1
   fi
-  # The first run still has to put the branch on origin, even when there is
-  # nothing to merge yet.
-  git push origin "HEAD:refs/heads/$branch"
-  echo 'updated=true'
-  exit 0
 fi
 
-before=$(git rev-parse HEAD)
-if ! git merge --no-edit "$ref"; then
-  echo "::error::$ref conflicts with this fork; merge it by hand." >&2
-  git merge --abort || true
-  exit 1
-fi
-
-git checkout "$before" -- .github/workflows/
-for added in $(git diff --name-only --diff-filter=A "$before" HEAD -- .github/workflows/); do
-  git rm -q -f "$added"
+# Main's workflows win, and upstream's added ones go: `checkout <tree> -- <dir>`
+# restores the files that exist there but keeps the ones it does not have.
+git checkout origin/main -- .github/workflows/
+for kept in $(git ls-files .github/workflows); do
+  if ! git cat-file -e "origin/main:$kept" 2>/dev/null; then
+    git rm -q -f "$kept"
+  fi
 done
 if ! git diff --cached --quiet; then
-  git commit -q -m "ci: keep this fork's workflows (upstream CI is not used here)"
+  git commit -q -m "ci: this fork's workflows, from main"
+fi
+
+# A first run has to put the branch on origin even when there was nothing to
+# merge; later runs only move it when a commit was made.
+if [ "$exists" = true ] && [ "$(git rev-parse HEAD)" = "$before" ]; then
+  echo "$branch is up to date."
+  echo 'updated=false'
+  exit 0
 fi
 
 # The branch only moves under this script, but a human push could still land
