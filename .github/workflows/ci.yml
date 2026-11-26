@@ -37,7 +37,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only || true)
-            if [ -n "$CHANGED" ] && ! echo "$CHANGED" | grep -q -v -E '^(.*\.md$|docs/|site/)' && ! echo "$CHANGED" | grep -q '^skills/'; then
+            if [ -n "$CHANGED" ] && ! echo "$CHANGED" | grep -q -v -E '^(.*\.md$|docs/|site/)'; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "Only docs/site/markdown changed; skipping build."
             fi
@@ -113,7 +113,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only || true)
-            if [ -n "$CHANGED" ] && ! echo "$CHANGED" | grep -q -v -E '^(.*\.md$|docs/|site/)' && ! echo "$CHANGED" | grep -q '^skills/'; then
+            if [ -n "$CHANGED" ] && ! echo "$CHANGED" | grep -q -v -E '^(.*\.md$|docs/|site/)'; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "Only docs/site/markdown changed; skipping build."
             fi
@@ -171,7 +171,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only || true)
-            if [ -n "$CHANGED" ] && ! echo "$CHANGED" | grep -q -v -E '^(.*\.md$|docs/|site/)' && ! echo "$CHANGED" | grep -q '^skills/'; then
+            if [ -n "$CHANGED" ] && ! echo "$CHANGED" | grep -q -v -E '^(.*\.md$|docs/|site/)'; then
               echo "skip=true" >> "$GITHUB_OUTPUT"
               echo "Only docs/site/markdown changed; skipping build."
             fi
