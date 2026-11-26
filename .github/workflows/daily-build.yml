@@ -210,12 +210,15 @@ jobs:
           BEHIND: ${{ steps.plan.outputs.behind }}
         run: |
           set -euo pipefail
-          previous=$(git tag -l 'v*-daily.*' --sort=-creatordate | head -1 || true)
+          # Not this build's own tag: the tag step has already created it, and
+          # "since itself" would always be zero commits.
+          previous=$(git tag -l 'v*-daily.*' --sort=-creatordate | grep -vx "$TAG" | head -1 || true)
           if [ -z "$previous" ]; then
             previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-daily.*' 2>/dev/null || true)
           fi
           range=${previous:-$(git rev-list --max-parents=0 HEAD | tail -1)}
-          count=$(git rev-list --count "$range..HEAD")
+          # `HEAD^`: the bump commit is this build's own, not upstream's work.
+          count=$(git rev-list --count --no-merges "$range..HEAD^")
 
           {
             echo '## 每日构建 · daily build'
@@ -237,7 +240,7 @@ jobs:
             echo '### 变更 · changes'
             echo ''
             if [ "$count" -gt 0 ]; then
-              git log --no-merges --pretty='- %s (`%h`)' "$range..HEAD" | head -40 || true
+              git log --no-merges --pretty='- %s (`%h`)' "$range..HEAD^" | head -40 || true
               if [ "$count" -gt 40 ]; then
                 echo "- … 其余 $((count - 40)) 条见提交历史 · $count in total"
               fi
