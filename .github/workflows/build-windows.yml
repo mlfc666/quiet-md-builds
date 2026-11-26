@@ -52,6 +52,27 @@ jobs:
         with:
           key: windows-${{ matrix.arch }}
 
+      # `build.rs` writes CARGO_PKG_VERSION into the resource script's
+      # FILEVERSION, which takes four 16-bit integers, so a pre-release version
+      # (`0.1.14-daily.20261126`, the daily builds) fails the resource compiler:
+      # `error RC2237: numeric value expected at daily`. The fix upstream's build
+      # script lacks is one expression, applied here rather than on a branch
+      # because upstream owns the file and the stable builds never need it —
+      # for `0.1.14` it produces exactly the same `0,1,14,0` as before.
+      - name: Keep the resource version numeric
+        shell: python
+        run: |
+          import pathlib, sys
+
+          build_rs = pathlib.Path('build.rs')
+          source = build_rs.read_text(encoding='utf-8')
+          before = """let numbers = format!("{},0", version.replace('.', ","));"""
+          after = """let numbers = format!("{},0", version.split(|c| c == '-' || c == '+').next().unwrap_or("").replace('.', ","));"""
+          if before not in source:
+              sys.exit('build.rs no longer matches this workaround; delete the step or update it')
+          build_rs.write_text(source.replace(before, after, 1), encoding='utf-8')
+          print('build.rs: FILEVERSION takes the numeric part of the version')
+
       - name: Build with the VS developer environment
         shell: pwsh
         run: |

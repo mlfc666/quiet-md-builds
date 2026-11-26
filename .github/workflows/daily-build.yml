@@ -217,8 +217,9 @@ jobs:
             previous=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-daily.*' 2>/dev/null || true)
           fi
           range=${previous:-$(git rev-list --max-parents=0 HEAD | tail -1)}
-          # `HEAD^`: the bump commit is this build's own, not upstream's work.
-          count=$(git rev-list --count --no-merges "$range..HEAD^")
+          # `$TAG^`: the bump commit is this build's own, not upstream's work.
+          # Also right when a forced rebuild reuses yesterday's checkout of it.
+          count=$(git rev-list --count --no-merges "$range..$TAG^")
 
           {
             echo '## 每日构建 · daily build'
@@ -240,7 +241,7 @@ jobs:
             echo '### 变更 · changes'
             echo ''
             if [ "$count" -gt 0 ]; then
-              git log --no-merges --pretty='- %s (`%h`)' "$range..HEAD^" | head -40 || true
+              git log --no-merges --pretty='- %s (`%h`)' "$range..$TAG^" | head -40 || true
               if [ "$count" -gt 40 ]; then
                 echo "- … 其余 $((count - 40)) 条见提交历史 · $count in total"
               fi
@@ -336,7 +337,9 @@ jobs:
             fi
           done
 
-          deadline=$((SECONDS + 55 * 60))
+          # Long enough for three macOS attempts (~20 minutes each when the
+          # runner is scarce) without letting a stuck run hold the job forever.
+          deadline=$((SECONDS + 100 * 60))
           while [ -s "$state" ]; do
             pending=0
             : > "$work/next"
@@ -373,29 +376,34 @@ jobs:
             mv "$work/next" "$state"
             [ "$pending" = 0 ] && break
             if [ "$SECONDS" -ge "$deadline" ]; then
-              echo '::warning::stopped waiting after 55 minutes; see the run list.'
+              echo '::warning::stopped waiting; whatever has not finished is reported below.'
               break
             fi
             sleep 45
           done
 
+          # Walk the expected workflows rather than the results file: a build
+          # that never settled has no line there, and silence must not read as
+          # success.
           {
             echo ''
             echo '### Builds'
             echo ''
             echo '| workflow | result |'
             echo '| --- | --- |'
-            while read -r wf conclusion; do
-              echo "| $wf | $conclusion |"
-            done < "$results"
+            for wf in build-linux build-macos build-windows; do
+              conclusion=$(awk -v wf="$wf" '$1 == wf {print $2}' "$results" | tail -1)
+              echo "| $wf | ${conclusion:-not finished} |"
+            done
           } >> "$GITHUB_STEP_SUMMARY"
 
-          while read -r wf conclusion; do
+          for wf in build-linux build-macos build-windows; do
+            conclusion=$(awk -v wf="$wf" '$1 == wf {print $2}' "$results" | tail -1)
             if [ "$conclusion" != success ]; then
-              echo "::error::$wf finished $conclusion."
+              echo "::error::$wf: ${conclusion:-not finished}."
               failed=1
             fi
-          done < "$results"
+          done
           exit $failed
 
       # A rolling channel: the newest two weeks stay downloadable, the rest are
