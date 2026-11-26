@@ -27,8 +27,10 @@ base=${3:-}
 
 git fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
 
+exists=false
 if git rev-parse -q --verify "refs/remotes/origin/$branch" > /dev/null; then
   start="refs/remotes/origin/$branch"
+  exists=true
 elif [ -n "$base" ] && git rev-parse -q --verify "$base" > /dev/null; then
   # First run: the branch does not exist yet, so it starts where the fork is.
   start=$base
@@ -41,7 +43,14 @@ git checkout -q -B "$branch" "$start"
 
 if git merge-base --is-ancestor "$ref" HEAD; then
   echo "$branch already contains $ref."
-  echo 'updated=false'
+  if [ "$exists" = true ]; then
+    echo 'updated=false'
+    exit 0
+  fi
+  # The first run still has to put the branch on origin, even when there is
+  # nothing to merge yet.
+  git push origin "HEAD:refs/heads/$branch"
+  echo 'updated=true'
   exit 0
 fi
 
