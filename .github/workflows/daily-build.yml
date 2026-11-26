@@ -1,6 +1,6 @@
 name: daily-build
 
-# A pre-release of `upstream-main`, built every morning whether or not upstream
+# A pre-release of `upstream-main`, built at the start of every day whether or not upstream
 # tagged a release. sync-upstream keeps that branch level with s1dashu/quiet-md
 # every hour; this workflow turns its tip into a date-stamped pre-release
 # (`v0.1.14-daily.20261126`) carrying the same assets as a stable one, so the
@@ -23,9 +23,10 @@ name: daily-build
 # instead when upstream has not moved since the previous daily.
 on:
   schedule:
-    # 20:17 UTC is 04:17 in Asia/Shanghai. GitHub's queue is busiest on the
-    # hour, hence :17.
-    - cron: '17 20 * * *'
+    # 16:17 UTC is 00:17 in Asia/Shanghai — a build at the start of the day, for
+    # the day that just ended (see the date below). GitHub's queue is busiest on
+    # the hour, hence :17.
+    - cron: '17 16 * * *'
   workflow_dispatch:
     inputs:
       force:
@@ -91,14 +92,16 @@ jobs:
           upstream_sha=$(git rev-parse upstream/main)
           behind=$(git rev-list --count "HEAD..$upstream_sha")
 
-          date=$(date +%Y%m%d)
+          # Named after the day that just ended, not the day it runs: a build at
+          # 00:17 on 11-26 carries 11-25's commits, so it is the 20261125 build.
+          stamp=$(date -d yesterday +%Y%m%d)
           base=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           [ -n "$base" ] || { echo '::error::Cargo.toml carries no version.'; exit 1; }
           # The branch carries upstream's version, but a dispatch from a daily
           # tag would hand us a date already, and no one wants
           # 0.1.14-daily.20261126-daily.20261127.
           base=${base%%-daily.*}
-          version="${base}-daily.${date}"
+          version="${base}-daily.${stamp}"
           tag="v${version}"
           last=$(git tag -l 'v*-daily.*' --sort=-creatordate | head -1 || true)
 
@@ -118,7 +121,7 @@ jobs:
           else
             published=true
             create=true
-            reason="new build for $date"
+            reason="new build for $stamp"
           fi
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
