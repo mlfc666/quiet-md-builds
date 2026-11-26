@@ -26,10 +26,11 @@ name: daily-build
 # instead when upstream has not moved since the previous daily.
 on:
   schedule:
-    # 16:17 UTC is 00:17 in Asia/Shanghai — a build at the start of the day, for
-    # the day that just ended (see the date below). GitHub's queue is busiest on
-    # the hour, hence :17.
-    - cron: '17 16 * * *'
+    # 16:22 UTC is 00:22 in Asia/Shanghai — a build at the start of the day, for
+    # the day that just ended (see the date below). The five minutes past
+    # sync-upstream's :17 gives it time to carry main's workflows over to
+    # `upstream-main`, which is what the tag below is cut from.
+    - cron: '22 16 * * *'
   workflow_dispatch:
     inputs:
       force:
