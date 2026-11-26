@@ -282,7 +282,7 @@ jobs:
           # so the builds have to be asked for on the tag explicitly — the same
           # reason sync-upstream dispatches its own.
           for wf in build-linux build-macos build-windows; do
-            if gh workflow run "$wf.yml" --ref "$TAG"; then
+            if gh workflow run "$wf.yml" --ref "$TAG" -f prerelease=true; then
               echo "  $wf requested"
             else
               echo "::error::$wf could not be dispatched on $TAG."
@@ -360,7 +360,7 @@ jobs:
                 echo "::warning::$wf ended $conclusion; asking for it again (attempt $((attempts + 1)))"
                 sleep 30
                 redispatched=0
-                if gh workflow run "$wf.yml" --ref "$TAG" < /dev/null; then
+                if gh workflow run "$wf.yml" --ref "$TAG" -f prerelease=true < /dev/null; then
                   for _ in $(seq 1 24); do
                     new=$(newest_run "$wf")
                     if [ -n "$new" ] && [ "$new" != "$id" ]; then
