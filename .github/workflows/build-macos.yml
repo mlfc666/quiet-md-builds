@@ -79,9 +79,11 @@ jobs:
         with:
           files: artifacts/*
           fail_on_unmatched_files: false
-          # `inputs` is empty on a tag push, so a stable release stays one.
-          prerelease: ${{ inputs.prerelease || false }}
-          make_latest: ${{ inputs.prerelease && 'false' || 'legacy' }}
+          # `inputs` is empty on a tag push, so a stable release stays one; and a
+          # date-stamped tag is a daily even when its dispatch forgot to say so
+          # (that once turned a pre-release into the repository's Latest).
+          prerelease: ${{ inputs.prerelease || contains(github.ref_name, '-daily.') }}
+          make_latest: ${{ (inputs.prerelease || contains(github.ref_name, '-daily.')) && 'false' || 'legacy' }}
           # A daily build re-runs the same tag when a runner was unavailable, so
           # replacing the files an earlier run uploaded has to be allowed.
           overwrite_files: true

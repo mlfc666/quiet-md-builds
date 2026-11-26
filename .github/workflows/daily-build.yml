@@ -1,11 +1,14 @@
 name: daily-build
 
-# A pre-release of `upstream-main`, built every morning whether or not upstream
-# tagged a release. sync-upstream keeps that branch level with s1dashu/quiet-md
-# every hour; this workflow turns its tip into a date-stamped pre-release
-# (`v0.1.14-daily.20261126`) carrying the same assets as a stable one, so the
-# newest code is downloadable without waiting for an upstream tag. Stable
-# releases stay where they belong: on main, when upstream tags one.
+# A pre-release of `upstream-main`, built at the start of every day whether or
+# not upstream tagged a release. sync-upstream keeps that branch level with
+# s1dashu/quiet-md every hour; this workflow turns its tip into a date-stamped
+# pre-release (`v0.1.14-daily.20261125`) carrying the same assets as a stable
+# one, so the newest code is downloadable without waiting for an upstream tag.
+# Stable releases stay where they belong: on main, when upstream tags one.
+#
+# The date is the day that just ended: the build at 00:17 on 11-26 carries
+# 11-25's commits, so it is the 20261125 build.
 #
 # The version is bumped in the tag's commit, not on either branch: the version is
 # what About, the installers and the package names show, so a daily has to carry
@@ -23,13 +26,15 @@ name: daily-build
 # instead when upstream has not moved since the previous daily.
 on:
   schedule:
-    # 20:17 UTC is 04:17 in Asia/Shanghai. GitHub's queue is busiest on the
-    # hour, hence :17.
-    - cron: '17 20 * * *'
+    # 16:22 UTC is 00:22 in Asia/Shanghai — a build at the start of the day, for
+    # the day that just ended (see the date below). The five minutes past
+    # sync-upstream's :17 gives it time to carry main's workflows over to
+    # `upstream-main`, which is what the tag below is cut from.
+    - cron: '22 16 * * *'
   workflow_dispatch:
     inputs:
       force:
-        description: 'Rebuild today''s pre-release even though its tag exists'
+        description: 'Rebuild the day''s pre-release even though its tag exists'
         type: boolean
         default: false
 
@@ -49,8 +54,8 @@ env:
   # or every release call lands on the wrong side (it did once).
   GH_REPO: ${{ github.repository }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  # A build is named after the maintainer's day: 20:17 UTC is 04:17 here, and a
-  # UTC stamp would put yesterday's date on today's build.
+  # The date on a build is a date in the maintainer's day, not UTC's: a run at
+  # 16:17 UTC is 00:17 here, on the next calendar day.
   TZ: Asia/Shanghai
 
 jobs:
@@ -75,7 +80,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
-      - name: Plan today's build
+      - name: Plan the build
         id: plan
         env:
           FORCE: ${{ inputs.force || false }}
@@ -91,14 +96,16 @@ jobs:
           upstream_sha=$(git rev-parse upstream/main)
           behind=$(git rev-list --count "HEAD..$upstream_sha")
 
-          date=$(date +%Y%m%d)
+          # Named after the day that just ended, not the day it runs: a build at
+          # 00:17 on 11-26 carries 11-25's commits, so it is the 20261125 build.
+          stamp=$(date -d yesterday +%Y%m%d)
           base=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           [ -n "$base" ] || { echo '::error::Cargo.toml carries no version.'; exit 1; }
           # The branch carries upstream's version, but a dispatch from a daily
           # tag would hand us a date already, and no one wants
           # 0.1.14-daily.20261126-daily.20261127.
           base=${base%%-daily.*}
-          version="${base}-daily.${date}"
+          version="${base}-daily.${stamp}"
           tag="v${version}"
           last=$(git tag -l 'v*-daily.*' --sort=-creatordate | head -1 || true)
 
@@ -118,7 +125,7 @@ jobs:
           else
             published=true
             create=true
-            reason="new build for $date"
+            reason="new build for $stamp"
           fi
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -276,7 +283,7 @@ jobs:
           # so the builds have to be asked for on the tag explicitly — the same
           # reason sync-upstream dispatches its own.
           for wf in build-linux build-macos build-windows; do
-            if gh workflow run "$wf.yml" --ref "$TAG"; then
+            if gh workflow run "$wf.yml" --ref "$TAG" -f prerelease=true; then
               echo "  $wf requested"
             else
               echo "::error::$wf could not be dispatched on $TAG."
@@ -354,7 +361,7 @@ jobs:
                 echo "::warning::$wf ended $conclusion; asking for it again (attempt $((attempts + 1)))"
                 sleep 30
                 redispatched=0
-                if gh workflow run "$wf.yml" --ref "$TAG" < /dev/null; then
+                if gh workflow run "$wf.yml" --ref "$TAG" -f prerelease=true < /dev/null; then
                   for _ in $(seq 1 24); do
                     new=$(newest_run "$wf")
                     if [ -n "$new" ] && [ "$new" != "$id" ]; then
