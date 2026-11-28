@@ -81,22 +81,22 @@ for kept in $(git ls-files .github/workflows); do
   fi
 done
 
-# Files that exist on main and nowhere upstream are this fork's own (this script,
-# the Arch packaging, BUILDS.md). They have to come from main as well: a branch
-# that keeps its first copy would keep building the old script and the old
-# package recipe forever. Upstream has no such paths, so nothing of theirs is at
-# risk. `comm` needs the two lists sorted the same way.
-main_list=$(mktemp)
-upstream_list=$(mktemp)
-fork_only=$(mktemp)
-git ls-tree -r --name-only origin/main | LC_ALL=C sort > "$main_list"
-git ls-tree -r --name-only "$ref" | LC_ALL=C sort > "$upstream_list"
-LC_ALL=C comm -23 "$main_list" "$upstream_list" > "$fork_only"
-if [ -s "$fork_only" ]; then
-  echo "Taking this fork's own files from main: $(wc -l < "$fork_only")"
-  tr '\n' '\0' < "$fork_only" | xargs -0 git checkout origin/main --
-fi
-rm -f "$main_list" "$upstream_list" "$fork_only"
+# This fork's own files come from main too. They exist nowhere upstream, so a
+# branch that kept its first copy would keep building the old merge script and
+# the old Arch recipe forever — which is how the release step once ran a script
+# from two days earlier. The list is explicit because "not in the upstream ref"
+# is not the same thing: upstream moves and deletes files, and that test would
+# resurrect every guide they renamed.
+fork_files=(
+  scripts/ci-merge-upstream.sh
+  scripts/package-arch.sh
+  BUILDS.md
+)
+for fork_file in "${fork_files[@]}"; do
+  if git cat-file -e "origin/main:$fork_file" 2>/dev/null; then
+    git checkout origin/main -- "$fork_file"
+  fi
+done
 if ! git diff --cached --quiet; then
   git commit -q -m "ci: this fork's workflows, from main"
 fi
