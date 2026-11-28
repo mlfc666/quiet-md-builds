@@ -55,10 +55,20 @@ jobs:
           git fetch --no-tags upstream main
           echo "upstream main: $(git rev-parse upstream/main)"
 
+      # The merge logic is read from main, not from the branch: a branch only
+      # learns of a fix to it after a merge, so running its copy would run the
+      # bug that is being fixed (the fix that makes workflow conflicts
+      # resolvable was itself invisible for a while that way).
+      - name: Prepare the merge script
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git show origin/main:scripts/ci-merge-upstream.sh > "$RUNNER_TEMP/ci-merge-upstream.sh"
+
       # The rolling branch: everything upstream has. It starts where the fork is
       # on its first run and is only ever advanced by a merge of upstream main.
       - name: Track upstream main
-        run: scripts/ci-merge-upstream.sh upstream-main upstream/main main
+        run: bash "$RUNNER_TEMP/ci-merge-upstream.sh" upstream-main upstream/main main
 
       # The stable branch. Upstream tags are fetched into a private namespace
       # because `refs/tags/` holds this fork's own tags, whose commits are its
@@ -98,7 +108,7 @@ jobs:
             target="refs/upstream/tags/$latest^{commit}"
             echo "main already contains $latest; tagging the upstream commit."
           else
-            scripts/ci-merge-upstream.sh main "refs/upstream/tags/$latest" main
+            bash "$RUNNER_TEMP/ci-merge-upstream.sh" main "refs/upstream/tags/$latest" main
             target=$(git rev-parse HEAD)
           fi
 

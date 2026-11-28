@@ -20,7 +20,9 @@
 #
 # Prints `updated=true` or `updated=false` as its last line.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# Not `dirname $0`: CI runs a copy of this script from $RUNNER_TEMP, because the
+# branch may still carry an older copy and it is the merge that fixes that.
+cd "$(git rev-parse --show-toplevel)"
 
 branch=${1:?usage: ci-merge-upstream.sh <branch> <upstream-ref> [<base-ref>]}
 ref=${2:?usage: ci-merge-upstream.sh <branch> <upstream-ref> [<base-ref>]}
@@ -78,6 +80,23 @@ for kept in $(git ls-files .github/workflows); do
     git rm -q -f "$kept"
   fi
 done
+
+# Files that exist on main and nowhere upstream are this fork's own (this script,
+# the Arch packaging, BUILDS.md). They have to come from main as well: a branch
+# that keeps its first copy would keep building the old script and the old
+# package recipe forever. Upstream has no such paths, so nothing of theirs is at
+# risk. `comm` needs the two lists sorted the same way.
+main_list=$(mktemp)
+upstream_list=$(mktemp)
+fork_only=$(mktemp)
+git ls-tree -r --name-only origin/main | LC_ALL=C sort > "$main_list"
+git ls-tree -r --name-only "$ref" | LC_ALL=C sort > "$upstream_list"
+LC_ALL=C comm -23 "$main_list" "$upstream_list" > "$fork_only"
+if [ -s "$fork_only" ]; then
+  echo "Taking this fork's own files from main: $(wc -l < "$fork_only")"
+  tr '\n' '\0' < "$fork_only" | xargs -0 git checkout origin/main --
+fi
+rm -f "$main_list" "$upstream_list" "$fork_only"
 if ! git diff --cached --quiet; then
   git commit -q -m "ci: this fork's workflows, from main"
 fi
