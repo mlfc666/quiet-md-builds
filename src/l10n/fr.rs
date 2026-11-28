@@ -705,6 +705,7 @@ pub(super) const STRINGS: &[(&str, &str)] = &[
     ("从 CSV 新建数据库…", "Nouvelle base de données depuis un CSV…"),
     ("已有同名文件：{}", "Un fichier portant ce nom existe déjà : {}"),
     ("文件夹里有 {} 个文件，一次最多导入 {} 个", "Le dossier contient {} fichiers. {} au maximum peuvent être importés à la fois"),
+    ("共有 {} 个文件，一次最多导入 {} 个", "Il y a {} fichiers. {} au maximum peuvent être importés à la fois"),
     ("文档库在 iCloud 云盘里。", "La bibliothèque se trouve dans iCloud Drive. "),
     ("你之前把文档库恢复成了原来的存放方式。", "Vous étiez déjà revenu à l’ancienne organisation. "),
     ("把文档库改为真实文件夹？", "Convertir la bibliothèque en vrais dossiers ?"),

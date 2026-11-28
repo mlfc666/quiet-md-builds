@@ -686,6 +686,7 @@ pub(super) const STRINGS: &[(&str, &str)] = &[
     ("从 CSV 新建数据库…", "Nueva base de datos desde CSV…"),
     ("导入文件夹", "Importar carpeta"),
     ("文件夹里有 {} 个文件，一次最多导入 {} 个", "La carpeta tiene {} archivos; se pueden importar hasta {} a la vez"),
+    ("共有 {} 个文件，一次最多导入 {} 个", "Hay {} archivos; se pueden importar hasta {} a la vez"),
     ("另存副本", "Guardar una copia"),
     ("重新载入", "Volver a cargar"),
     ("{} 天", "{} días"),

@@ -69,19 +69,11 @@ impl Workspace {
     }
 
     fn import_dropped_files(&mut self, paths: Vec<PathBuf>, target: SidebarDropAt, window: &mut Window, cx: &mut Context<Self>) {
-        let (dirs, files): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| p.fs_is_dir());
-        let known: std::collections::HashSet<String> = self.entries.iter().map(|e| e.id.clone()).collect();
         let parent = target.parent.clone();
         self.landed_in(parent.as_deref());
-        if !files.is_empty() { self.import_paths(&files, parent.clone(), false, window, cx); }
-        // Into the slot it showed: what came in at this level goes before the row below it.
-        let new: Vec<String> = self.entries.iter().filter(|e| !known.contains(&e.id) && e.meta.parent == parent).map(|e| e.id.clone()).collect();
-        self.place_dropped(&new, &target);
-        // Folders come in off the window's thread; each takes its slot once it is in.
-        for dir in &dirs {
-            let target = target.clone();
-            self.import_folder_then(dir, parent.clone(), false, Some(Box::new(move |w, id| w.place_dropped(&[id.to_string()], &target))), window, cx);
-        }
+        // Files and folders in one import, off the window's thread (one at a time: a second import
+        // would be dropped while the first runs); into the slot it showed once in, before the row below it.
+        self.import_paths_then(&paths, parent, false, Some(Box::new(move |w, ids| w.place_dropped(ids, &target))), window, cx);
         cx.notify();
     }
 

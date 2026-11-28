@@ -692,6 +692,7 @@ pub(super) const STRINGS: &[(&str, &str)] = &[
     ("导入 DocxXML…", "DocxXML içe aktar…"),
     ("已有同名文件：{}", "Bu adda bir dosya zaten var: {}"),
     ("文件夹里有 {} 个文件，一次最多导入 {} 个", "Klasörde {} dosya var. Tek seferde en fazla {} dosya içe aktarılabilir"),
+    ("共有 {} 个文件，一次最多导入 {} 个", "{} dosya var. Tek seferde en fazla {} dosya içe aktarılabilir"),
     ("文档库在 iCloud 云盘里。", "Kitaplık iCloud Drive içinde yer alıyor. "),
     ("你之前把文档库恢复成了原来的存放方式。", "Daha önce eski düzenlemeye geri dönmüştünüz. "),
     ("把文档库改为真实文件夹？", "Kitaplık gerçek klasörlere dönüştürülsün mü?"),
