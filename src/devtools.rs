@@ -18,9 +18,13 @@
 //!   windows <n> (that many windows are open; else the run ends with exit code 3) |
 //!   caret (logs `caret <y> of <height> at <top>`: the caret line's middle on the page, the page's top in the window) |
 //!   showing <title> (the document or folder page in front has that title; else the run ends with exit code 3) |
+//!   frame (logs `frame <w> <h> sidebar <open> <width>`: the window's size and its sidebar) |
+//!   url <quietmd://…> | url @<file> (a link handed over as `quiet open` hands one, or the one in that file; logs the block selected after it) |
 //!   origin board | origin window (the points of the mouse and file steps after it count from the open
 //!   画板's top-left corner, or again from the window's; no board open ends the run with exit code 3)
-//!   filedrag x y <path>[|<path>...] / filedrop x y / fileleave (files dragged in from the Finder)
+//!   filedrag x y <path>[|<path>...] / filedrop x y / fileleave (files dragged in from the Finder) |
+//!   downat / dragat / upat / moveat <name> [fx fy] (down, dragto, up or move at `fx fy` of a tracked
+//!   control's or sidebar row's size from its top-left; default its middle)
 //! For profiling: bench <n> <step> (runs the step n times, drawing a frame
 //!   synchronously after each, and prints step / frame / editor-render times) |
 //!   wheel x y dy [dx] (one scroll-wheel event; dx: sideways component).
@@ -175,7 +179,7 @@ pub fn start(window: &mut Window, cx: &mut App) {
                         window.draw(cx).clear(cx);
                         if cmd != "anchor" { return row_center(window, name); }
                         let ws = root.downcast::<crate::app::Workspace>().map_err(|_| "no workspace window".to_string())?;
-                        let b = ws.read(cx).home.anchor(name).or_else(|| probed_anchor(window, name)).ok_or(format!("no anchor {name:?}"))?;
+                        let b = ws.read(cx).folder_page.anchor(name).or_else(|| probed_anchor(window, name)).ok_or(format!("no anchor {name:?}"))?;
                         Ok((f32::from(b.center().x).round(), f32::from(b.center().y).round()))
                     }).unwrap_or_else(|e| Err(e.to_string()));
                     match at {
@@ -188,6 +192,31 @@ pub fn start(window: &mut Window, cx: &mut App) {
                             eprintln!("devtools: {cmd}: {e}");
                             std::process::exit(3);
                         }
+                    }
+                }
+                // `downat` / `dragat` / `upat` / `moveat <name> [fx fy]`: press, drag, release or move
+                // at a point of a tracked control or sidebar row, `fx fy` of its width and height
+                // from its top-left (default its middle). Not there: stop, as `anchor` does.
+                "downat" | "dragat" | "upat" | "moveat" => {
+                    let words: Vec<&str> = rest.split_whitespace().collect();
+                    let frac = (words.len() >= 3).then(|| (words[words.len() - 2].parse::<f32>().ok(), words[words.len() - 1].parse::<f32>().ok())).and_then(|(x, y)| x.zip(y));
+                    let name = if frac.is_some() { words[..words.len() - 2].join(" ") } else { words.join(" ") };
+                    let (fx, fy) = frac.unwrap_or((0.5, 0.5));
+                    let at = handle.update(cx, |root, window, cx| {
+                        rows_begin(window);
+                        window.refresh();
+                        window.draw(cx).clear(cx);
+                        let ws = root.downcast::<crate::app::Workspace>().map_err(|_| "no workspace window".to_string())?;
+                        let b = ws.read(cx).folder_page.anchor(&name).or_else(|| probed_anchor(window, &name)).map_or_else(|| row_bounds(window, &name), Ok)?;
+                        Ok((f32::from(b.left() + b.size.width * fx).round(), f32::from(b.top() + b.size.height * fy).round()))
+                    }).unwrap_or_else(|e| Err(e.to_string()));
+                    match at {
+                        Ok((x, y)) => {
+                            eprintln!("devtools: {cmd} {name:?} at {x} {y}");
+                            resolved = format!("{x} {y}");
+                            (match cmd { "downat" => "down", "dragat" => "dragto", "upat" => "up", _ => "move" }, resolved.as_str())
+                        }
+                        Err(e) => { eprintln!("devtools: {cmd}: {e}"); std::process::exit(3); }
                     }
                 }
                 "origin" => {
@@ -221,6 +250,23 @@ pub fn start(window: &mut Window, cx: &mut App) {
                     eprintln!("devtools: {cmd}: wanted {}, {} open", rest.trim(), all.len());
                     std::process::exit(3);
                 }
+                // `url <quietmd://…>`: a link handed over as the system hands one (`quiet open`);
+                // logs the block selected afterwards, if any.
+                "url" => {
+                    // `url @file`: the link another process wrote there meanwhile.
+                    let link = match rest.trim().strip_prefix('@') { Some(f) => std::fs::read_to_string(f).unwrap_or_default().trim().to_string(), None => rest.trim().to_string() };
+                    let picked = handle.update(cx, |root, window, cx| {
+                        let ws = root.downcast::<crate::app::Workspace>().ok()?;
+                        ws.update(cx, |w, cx| {
+                            w.open_link(&link, window, cx);
+                            let ed = w.editor.as_ref()?.read(cx);
+                            let id = *ed.core.block_sel_ids().first()?;
+                            fdl_core::block_ref::items(&ed.core.doc).into_iter().find(|it| it.block.id == id).map(|it| fdl_core::block_ref::text_of(it.block))
+                        })
+                    }).ok().flatten();
+                    eprintln!("devtools: url selected {picked:?}");
+                    continue
+                }
                 // `showing <title>`: the document (or folder page) in front has that title; else stop as `row` does.
                 "showing" => {
                     let want = rest.trim();
@@ -233,6 +279,17 @@ pub fn start(window: &mut Window, cx: &mut App) {
                     if shown.as_deref() == Some(want) { eprintln!("devtools: showing {want:?}"); continue }
                     eprintln!("devtools: showing: wanted {want:?}, in front: {shown:?}");
                     std::process::exit(3);
+                }
+                // `frame`: logs the window's size and its sidebar (`frame <w> <h> sidebar <open> <width>`).
+                "frame" => {
+                    let at = handle.update(cx, |root, window, cx| {
+                        let ws = root.downcast::<crate::app::Workspace>().ok()?;
+                        let w = ws.read(cx);
+                        let s = window.window_bounds().get_bounds().size;
+                        Some(format!("{} {} sidebar {} {}", f32::from(s.width).round(), f32::from(s.height).round(), w.sidebar_open, w.sidebar_w(window).round()))
+                    }).ok().flatten();
+                    eprintln!("devtools: frame {}", at.as_deref().unwrap_or("none"));
+                    continue
                 }
                 // `caret`: logs where the caret's line sits on the page (`caret <y> of <height>`).
                 "caret" => {
@@ -274,14 +331,22 @@ pub fn start(window: &mut Window, cx: &mut App) {
                     });
                     continue;
                 }
+                // `FDL_FRAMES`: a frame every 8 ms as a 120 Hz display link would ask while something
+                // animates, the main thread free in between for whatever else is due (unlike
+                // `FDL_ANIMATE`, which holds it), so the frame log shows what lands among the frames.
+                let pace = frames_on();
                 while Instant::now() < end {
-                    cx.background_executor().timer(Duration::from_millis(16).min(end - Instant::now())).await;
+                    cx.background_executor().timer(Duration::from_millis(if pace { 8 } else { 16 }).min(end - Instant::now())).await;
                     let _ = handle.update(cx, |_, window, cx| {
+                        if pace { window.refresh(); }
                         if window.needs_draw() {
+                            let t = Instant::now();
                             window.draw(cx).clear(cx);
+                            if pace { frame_log(format!("devtools: whole-draw {:.4} {:.2}", since_launch(t), t.elapsed().as_secs_f64() * 1e3)); }
                         }
                     });
                 }
+                flush_frames();
                 continue;
             }
             // `burst name n`: n captures ~8ms apart, to catch transient frames.
@@ -335,6 +400,7 @@ pub fn start(window: &mut Window, cx: &mut App) {
                 );
                 continue;
             }
+            if frames_on() && matches!(cmd, "click" | "dclick" | "key") { *STEP.lock().unwrap() = Some((format!("{cmd} {}", rest.trim()), Instant::now())); }
             let quit = cmd == "quit";
             if cmd == "record" || (quit && recording.is_some()) {
                 if let Some(stop) = recording.take() {
@@ -512,7 +578,7 @@ type Drawn = std::cell::RefCell<std::collections::HashMap<WindowId, Vec<(String,
 thread_local! {
     /// The sidebar rows drawn in each window's last frame: title, and the part of the row on screen.
     static ROWS: Drawn = Default::default();
-    /// Controls that `anchor_probe` named, the same way (the app's own anchors are `Home::anchor`).
+    /// Controls that `anchor_probe` named, the same way (the app's own anchors are `FolderPage::anchor`).
     static ANCHORS: Drawn = Default::default();
 }
 
@@ -536,6 +602,84 @@ fn probe(list: &'static std::thread::LocalKey<Drawn>, title: SharedString) -> Op
 /// `title`'s row is drawn, for `row` and friends.
 pub fn row_probe(title: impl Into<SharedString>) -> Option<AnyElement> { probe(&ROWS, title.into()) }
 
+/// `FDL_FRAMES`: every frame of a window logs when it began (seconds since launch), how long it
+/// took from the root's render to its last paint, and the gap since the frame before:
+/// `devtools: frame-time <t> draw <ms> gap <ms>`. With it, `span` logs main-thread work over 1 ms
+/// (`devtools: busy <what> at <t> <ms>`), so a dropped frame can be lined up with what ran then.
+fn frames_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("FDL_FRAMES").is_some();
+        #[cfg(target_os = "macos")]
+        if on { native::no_nap(); }
+        on
+    })
+}
+fn since_launch(t: Instant) -> f64 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    t.duration_since(*T0.get_or_init(Instant::now)).as_secs_f64()
+}
+thread_local! { static FRAME: std::cell::Cell<(Option<Instant>, Option<Instant>)> = const { std::cell::Cell::new((None, None)) }; }
+thread_local! { static FRAME_INSTR: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+/// Instructions this process has retired (macOS; 0 elsewhere): a frame's cost that, unlike its
+/// time, does not depend on the core it ran on or on what else the machine is doing.
+fn instructions() -> u64 {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        unsafe extern "C" { fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u64) -> i32; }
+        // rusage_info_v4: a 16-byte uuid, then u64s; ri_instructions is the 30th.
+        let mut buf = [0u64; 64];
+        if proc_pid_rusage(std::process::id() as i32, 4, buf.as_mut_ptr()) == 0 { return buf[2 + 29] }
+    }
+    0
+}
+/// The lines are kept and written out between frames (`flush_frames`): writing to the log as each
+/// frame ends took about a millisecond of the frame.
+static FRAME_LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
+fn frame_log(line: String) { FRAME_LOG.lock().unwrap().push(line); }
+fn flush_frames() {
+    let lines = std::mem::take(&mut *FRAME_LOG.lock().unwrap());
+    if !lines.is_empty() { use std::io::Write; let _ = std::io::stderr().write_all((lines.join("\n") + "\n").as_bytes()); }
+}
+
+/// A click or key just sent (`FDL_FRAMES`): the next frame logs how long after it it was
+/// painted (`devtools: step <step> to frame <ms>`), the handler's work included.
+static STEP: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+static FIRST_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Called first thing in the root's render.
+pub fn frame_begin() {
+    if frames_on() { FRAME_INSTR.with(|i| i.set(instructions())); FRAME.with(|f| f.set((Some(Instant::now()), f.get().1))); }
+}
+
+/// The root's last child: paints after the rest of the window.
+pub fn frame_probe() -> Option<AnyElement> {
+    if !frames_on() { return None }
+    Some(canvas(|_, _, _| {}, |_, _, _, _| FRAME.with(|f| {
+        let (Some(t0), last) = f.get() else { return };
+        let gap = last.map_or(0., |l| t0.duration_since(l).as_secs_f64() * 1e3);
+        let instr = instructions().saturating_sub(FRAME_INSTR.with(|i| i.get())) as f64 / 1e6;
+        // The first frame at once, with the wall clock, for timing a launch from outside.
+        if FIRST_FRAME.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64() * 1e3);
+            eprintln!("devtools: first-frame epoch-ms {epoch:.1} draw {:.2}", t0.elapsed().as_secs_f64() * 1e3);
+        }
+        if let Some((step, at)) = STEP.lock().unwrap().take() { frame_log(format!("devtools: step {step} to frame {:.2}", at.elapsed().as_secs_f64() * 1e3)); }
+        frame_log(format!("devtools: frame-time {:.4} draw {:.2} gap {gap:.2} minstr {instr:.2}", since_launch(t0), t0.elapsed().as_secs_f64() * 1e3));
+        f.set((None, Some(t0)));
+    })).absolute().size_0().into_any_element())
+}
+
+/// Times main-thread work for `FDL_FRAMES` until dropped.
+pub struct Span(&'static str, Instant);
+impl Drop for Span {
+    fn drop(&mut self) {
+        let ms = self.1.elapsed().as_secs_f64() * 1e3;
+        if ms > 1. { frame_log(format!("devtools: busy {} at {:.4} {ms:.2}", self.0, since_launch(self.1))); }
+    }
+}
+pub fn span(what: &'static str) -> Option<Span> { frames_on().then(|| Span(what, Instant::now())) }
+
 /// Put inside a (relative) control to click by `anchor <name>`, where the app keeps no anchor
 /// of its own (外观's font pickers, a downloaded font's delete button).
 pub fn anchor_probe(name: impl Into<SharedString>) -> Option<AnyElement> { probe(&ANCHORS, name.into()) }
@@ -547,11 +691,15 @@ fn probed_anchor(window: &Window, name: &str) -> Option<Bounds<Pixels>> {
 
 /// The middle of the topmost sidebar row titled `title` in the window's last frame.
 fn row_center(window: &Window, title: &str) -> Result<(f32, f32), String> {
+    row_bounds(window, title).map(|b| (f32::from(b.center().x).round(), f32::from(b.center().y).round()))
+}
+
+/// The topmost sidebar row titled `title` in the window's last frame.
+fn row_bounds(window: &Window, title: &str) -> Result<Bounds<Pixels>, String> {
     ROWS.with(|r| {
         let r = r.borrow();
         let rows = r.get(&window.window_handle().window_id()).map_or(&[][..], |v| &v[..]);
-        rows.iter().filter(|(t, _)| t == title).min_by(|a, b| a.1.origin.y.partial_cmp(&b.1.origin.y).unwrap())
-            .map(|(_, b)| (f32::from(b.center().x).round(), f32::from(b.center().y).round()))
+        rows.iter().filter(|(t, _)| t == title).min_by(|a, b| a.1.origin.y.partial_cmp(&b.1.origin.y).unwrap()).map(|(_, b)| *b)
             .ok_or_else(|| format!("no sidebar row or menu item titled {title:?}; shown: {:?}", rows.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>()))
     })
 }
@@ -597,6 +745,19 @@ mod native {
     use objc::{class, msg_send, sel, sel_impl};
 
     pub const MOVED: u64 = 5;
+
+    /// `FDL_FRAMES`: keeps App Nap off the scripted (never active) app, as the user's own use
+    /// does for the app in front, so its timers keep their time and frames come when asked.
+    pub fn no_nap() {
+        // NSActivityUserInitiated | NSActivityLatencyCritical
+        let options: u64 = 0x00FFFFFF | 0xFF00000000;
+        unsafe {
+            let info: *mut Object = msg_send![class!(NSProcessInfo), processInfo];
+            let reason: *mut Object = msg_send![class!(NSString), stringWithUTF8String: c"frame timing".as_ptr()];
+            let token: *mut Object = msg_send![info, beginActivityWithOptions: options reason: reason];
+            let _: *mut Object = msg_send![token, retain];
+        }
+    }
     pub const LEFT_DOWN: u64 = 1;
     pub const LEFT_UP: u64 = 2;
     pub const RIGHT_DOWN: u64 = 3;

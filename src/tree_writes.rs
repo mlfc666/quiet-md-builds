@@ -65,9 +65,9 @@ struct Written { result: anyhow::Result<()>, entries: Option<Vec<Entry>>, change
 /// What a move into another top-level folder brings back: each library's writer and what it listed.
 struct Crossed { result: anyhow::Result<()>, lists: Vec<(String, u64, Store, Vec<Entry>)>, changes: Vec<FileDelta>, warnings: Vec<String> }
 
-fn move_failed(e: &anyhow::Error) -> String { crate::localized_format!("移动失败：{}", "Could not move document: {}", crate::settings::diagnostic(&e.to_string())) }
-fn rename_failed(e: &anyhow::Error) -> String { crate::localized_format!("重命名失败：{}", "Could not rename: {}", crate::settings::diagnostic(&e.to_string())) }
-fn name_not_followed(e: &anyhow::Error) -> String { crate::localized_format!("未能按标题重命名文件：{}", "Could not rename the file after its title: {}", crate::settings::diagnostic(&e.to_string())) }
+fn move_failed(e: &anyhow::Error) -> String { crate::localized_format!("移动失败：{}", "Moving the document failed: {}", crate::settings::diagnostic(&e.to_string())) }
+fn rename_failed(e: &anyhow::Error) -> String { crate::localized_format!("重命名失败：{}", "Renaming failed: {}", crate::settings::diagnostic(&e.to_string())) }
+fn name_not_followed(e: &anyhow::Error) -> String { crate::localized_format!("按标题重命名文件失败：{}", "Renaming the file after its title failed: {}", crate::settings::diagnostic(&e.to_string())) }
 
 impl Workspace {
     pub(crate) fn tree_writes_pending(&self) -> bool { self.tree_writes.saving || !self.tree_writes.pending.is_empty() }
@@ -119,7 +119,7 @@ impl Workspace {
         }
         self.tree_writes.pending.push_back(write);
         self.save_next_tree_write(cx);
-        // A 数据表 writes its file as it is edited, by path: the open one's move lands before the next cell does.
+        // A 数据库 writes its file as it is edited, by path: the open one's move lands before the next cell does.
         if self.editor.as_ref().is_some_and(|e| e.read(cx).table_file) && self.current.clone().is_some_and(|c| self.awaits_tree_write(&c)) { self.settle_tree_writes(cx); }
     }
 
@@ -270,6 +270,7 @@ impl Workspace {
         let Crossed { result, lists, changes, warnings } = done;
         for warning in warnings { crate::logging::write(&warning); }
         for (key, n, writer, entries) in lists { self.entries.set(self.store.adopt_written(&key, n, writer, entries)); }
+        self.tops_moved(cx);
         self.store.moved_across();
         match result {
             Ok(()) => {
@@ -302,7 +303,7 @@ impl Workspace {
             (TreeWrite::Move(m), Ok(())) => {
                 self.tree_move_written(m, changes);
                 // Into another folder: the library takes over the writer, so paths are right from here on.
-                if let Some(entries) = entries { self.entries.set(self.store.adopt_written(key, n, writer, entries)); self.sort(); self.sync_sub_pages(cx); }
+                if let Some(entries) = entries { self.entries.set(self.store.adopt_written(key, n, writer, entries)); self.sort(); self.sync_sub_pages(cx); self.tops_moved(cx); }
             }
             (TreeWrite::Move(m), Err(e)) => {
                 self.forget_file_change(m.history);
@@ -322,7 +323,7 @@ impl Workspace {
             }
             (TreeWrite::Rename(r), result) => {
                 // The library takes over what the writer read and wrote, so paths are right from here on.
-                if let Some(entries) = entries { self.entries.set(self.store.adopt_written(key, n, writer, entries)); }
+                if let Some(entries) = entries { self.entries.set(self.store.adopt_written(key, n, writer, entries)); self.tops_moved(cx); }
                 let open = self.current.as_deref() == Some(r.id.as_str());
                 match (&r.gesture, result) {
                     (Some(g), Ok(())) => {

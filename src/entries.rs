@@ -1,6 +1,6 @@
 //! `Workspace.entries`: every page and folder the window shows. Read as a
 //! slice; changed only through `set`, `edit` and `take`, each of which gives
-//! it a new `generation`. The sidebar's rows and Home's cards are rebuilt when `generation`
+//! it a new `generation`. The sidebar's rows and the folder page's cards are rebuilt when `generation`
 //! moves, instead of hashing every entry each frame to find out.
 use crate::store::Entry;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +19,8 @@ impl From<Vec<Entry>> for Entries { fn from(list: Vec<Entry>) -> Self { Entries 
 impl Entries {
     /// Moves with every change: equal means the same entries.
     pub fn generation(&self) -> u64 { self.generation }
-    pub fn set(&mut self, list: Vec<Entry>) { self.list = list; self.generation = next(); }
+    /// The list replaced is freed off the main thread: 15,000 entries take milliseconds.
+    pub fn set(&mut self, list: Vec<Entry>) { fdl_core::drop_later::drop_later(std::mem::replace(&mut self.list, list)); self.generation = next(); }
     /// To change them in place; counts as a change whether or not one is made.
     pub fn edit(&mut self) -> &mut Vec<Entry> { self.generation = next(); &mut self.list }
     pub fn take(&mut self) -> Vec<Entry> { self.generation = next(); std::mem::take(&mut self.list) }

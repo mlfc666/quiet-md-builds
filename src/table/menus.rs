@@ -177,7 +177,7 @@ pub(crate) fn popup(v: &TableView, base: &Base, t: &Table, view: &View, _window:
         Popup::Date { rec, field, year, month } => editors::date_popup(v, t, *rec, *field, *year, *month, cx),
         Popup::Links { rec, field } => editors::links_popup(v, base, t, *rec, *field, cx),
         Popup::Files { rec, field } => editors::files_popup(v, t, *rec, *field, cx),
-        Popup::NotePick { rec, field } => notes::pick_popup(v, *rec, *field, cx),
+        Popup::NotePick { rec, field, new } => notes::pick_popup(v, *rec, *field, *new, cx),
         Popup::Panel(panel) => panels::render(v, base, t, view, panel, cx),
         Popup::More => more_menu(v, cx),
     };
@@ -239,8 +239,11 @@ fn field_menu(v: &TableView, t: &Table, view: &View, fid: FieldId, pos: Point<Pi
             panels::open(v, panels::Kind::Filter, pos, window, cx);
         })))
         .child(menu_item("tb-fm-group", "view-list", label("按此字段分组"), false).on_click(cx.listener(move |v, _, window, cx| { v.edit_view(cx, |view| view.opts.groups = vec![SortBy { field: fid, desc: false }]); close(v, window, cx); })))
-        // with several columns selected (this one among them) hide and delete act on all of them but the title
-        .when(!picked.is_empty(), |d| { let (n, hide, del) = (picked.len(), picked.clone(), picked.clone()); d.child(menu_rule())
+        // with several columns selected (this one among them) hide and delete act on all of them but the title;
+        // the title alone: delete shows, dimmed, saying why
+        .child(menu_rule())
+        .when(picked.is_empty(), |d| d.child(menu_item("tb-fm-del", "bin", label("删除字段/列"), true).disabled(true).description(label("主字段作为记录标题保留"))))
+        .when(!picked.is_empty(), |d| { let (n, hide, del) = (picked.len(), picked.clone(), picked.clone()); d
             .child(menu_item("tb-fm-hide", "eye", if n > 1 { crate::localized_format!("隐藏 {n} 个字段", "Hide {n} fields") } else { label("隐藏字段/列") }, false)
                 .on_click(cx.listener(move |v, _, window, cx| { let ids = hide.clone(); v.edit_view(cx, |view| view.opts.hidden.extend(ids)); v.col_sel.clear(); close(v, window, cx); })))
             .child(menu_item("tb-fm-del", "bin", if n > 1 { crate::localized_format!("删除 {n} 个字段", "Delete {n} fields") } else { label("删除字段/列") }, true)
@@ -273,7 +276,7 @@ fn cell_menu(v: &TableView, t: &Table, view: &View, rec: RecId, cx: &Context<Tab
         // on a 笔记 cell: point it at a note the library has
         .when_some(v.sel.map(|s| s.head).filter(|c| c.0 == rec && t.field(c.1).is_some_and(|f| f.ty == FieldType::Note) && notes::allowed(v, cx)), |d, cell| {
             let at = v.popup.as_ref().map(|p| p.0).unwrap_or_default();
-            d.child(menu_item("tb-cm-note", "link", label("指向已有笔记"), false).on_click(cx.listener(move |v, _, window, cx| notes::open_pick(v, cell, at, window, cx))))
+            d.child(menu_item("tb-cm-note", "link", label("指向已有笔记"), false).on_click(cx.listener(move |v, _, window, cx| notes::open_pick(v, cell, at, false, window, cx))))
         })
         .child(menu_item("tb-cm-copy", "copy", label("复制"), false).on_click(cx.listener(|v, _, window, cx| { keys::copy(v, false, cx); v.close_popup(window, cx); })))
         .child(menu_item("tb-cm-paste", "file-text", label("粘贴"), false).on_click(cx.listener(|v, _, window, cx| { keys::paste(v, cx); v.close_popup(window, cx); })))

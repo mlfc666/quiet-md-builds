@@ -1,5 +1,5 @@
 //! Embed the files under assets/ that the app reads into the binary (see
-//! src/assets.rs); SKIP lists the rest.
+//! src/assets.rs); SKIP lists the rest. The guides are core's (crates/core/build.rs).
 
 use std::fmt::Write;
 use std::path::Path;
@@ -14,9 +14,8 @@ fn main() {
     let xiaolai = std::env::var_os("CARGO_FEATURE_EMBED_XIAOLAI").is_some() && !web;
     let skip: Vec<&str> = SKIP.iter().copied().chain((!linux).then_some("fonts/emoji/")).chain((!xiaolai).then_some("fonts/excalidraw/Xiaolai-Regular.ttf.zlib")).collect();
     embed("assets", "assets.rs", &skip);
-    embed("shared-mock/library", "guides.rs", &[]);
-    embed("shared-mock/library-zh", "guides_zh.rs", &[]);
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") { windows_resources(); }
+    // rc.exe comes with the MSVC toolchain; the windows-gnu target is only type-checked (CI's quick job), never shipped.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") { windows_resources(); }
 }
 
 fn windows_resources() {
@@ -60,7 +59,7 @@ END
 /// Files under assets/ the binary never reads: source art, the preview's dev
 /// icon (scripts/preview.sh), the Windows icon (linked as a resource below and
 /// used by the installer), themes (`include_str!` in src/themes.rs) and notes.
-const SKIP: &[&str] = &["branding/hamster-source.png", "branding/quiet-q/", "branding/app-icon-dev.png", "branding/app-icon.ico", "themes/", "onboarding/README.md"];
+const SKIP: &[&str] = &["branding/hamster-source.png", "branding/quiet-q/", "branding/app-icon-dev.png", "branding/app-icon.ico", "themes/"];
 
 fn embed(source: &str, output: &str, skip: &[&str]) {
     // Read at run time: a compile-time path goes stale when the checkout moves.

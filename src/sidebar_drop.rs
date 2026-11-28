@@ -33,7 +33,7 @@ impl Workspace {
             cx.notify();
         }
         // Over the sidebar, the page's own drop veil steps back.
-        if self.sidebar_drop.is_some() && let Some(d) = self.home.folders.file_drop.as_mut() { d.leave(); cx.notify(); }
+        if self.sidebar_drop.is_some() && let Some(d) = self.folder_page.folders.file_drop.as_mut() { d.leave(); cx.notify(); }
         self.sidebar_drop.is_some()
     }
 
@@ -42,7 +42,7 @@ impl Workspace {
         let Some(target) = self.sidebar_drop.take() else { return };
         let (dirs, files): (Vec<_>, Vec<_>) = paths.into_iter().filter(|p| importable(p)).partition(|p| p.fs_is_dir());
         if dirs.is_empty() && files.is_empty() {
-            self.show_toast_kind(crate::ui::ToastKind::Error, tr("这些文件不能导入：支持 Markdown、DocxXML 文件和文件夹", "These files can't be imported: Markdown, DocxXML files and folders are supported"), cx);
+            self.show_toast_kind(crate::ui::ToastKind::Error, tr("支持导入 Markdown、DocxXML 文件和文件夹", "Markdown and DocxXML files and folders can be imported"), cx);
             cx.notify();
             return;
         }
@@ -59,7 +59,7 @@ impl Workspace {
     /// The place a drop goes, for the dialog and the toast.
     pub(crate) fn drop_place(&self, target: &SidebarDropAt) -> String {
         target.parent.as_ref().and_then(|t| self.entries.iter().find(|e| &e.id == t)).map(|e| crate::settings::display_title(&e.title))
-            .unwrap_or_else(|| self.home_name())
+            .unwrap_or_else(|| self.front_top_name())
     }
 
     /// 导入 confirmed: bring it in where it was dropped.

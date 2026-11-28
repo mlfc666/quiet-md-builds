@@ -12,7 +12,8 @@
 use super::color;
 use gpui::*;
 use std::cell::Cell;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// The thumb's width (shadcn: `w-2.5` 10, less `p-px` both sides and the clear 1pt `border-l`).
 pub const THUMB: f32 = 7.;
@@ -34,7 +35,7 @@ pub const FADE: Duration = Duration::from_millis(150);
 pub fn ends_for(r: f32) -> f32 { if r > 0. { r + PAD } else { PAD } }
 
 /// How far the window's own corner curves in from its edges, for a box that runs into it (the page, a
-/// settings page, the home lists, a side panel): macOS draws a continuous corner whose curve starts 18
+/// settings page, the folder page lists, a side panel): macOS draws a continuous corner whose curve starts 18
 /// from the corner (measured on macOS 27 with `deskshot`, 2026-11-25); Windows 11 rounds 8.
 pub const WINDOW_R: f32 = if cfg!(target_os = "macos") { 18. } else if cfg!(windows) { 8. } else { 0. };
 
@@ -155,8 +156,8 @@ impl Tone {
 pub struct Fade {
     /// The opacity and when it was last stepped.
     at: Cell<Option<(f32, Instant)>>,
-    /// The last scroll offset seen and when it changed.
-    moved: Cell<Option<(f32, Instant)>>,
+    /// The last scroll offset seen and when it changed (none: not since the first frame).
+    moved: Cell<Option<(f32, Option<Instant>)>>,
     /// The last time the thumb had cause to show.
     seen: Cell<Option<Instant>>,
 }
@@ -168,10 +169,10 @@ impl Fade {
         match self.moved.get() {
             Some((o, _)) if (o - offset).abs() < 0.5 => {}
             // The first frame is not a scroll.
-            None => self.moved.set(Some((offset, now - HIDE))),
-            _ => self.moved.set(Some((offset, now))),
+            None => self.moved.set(Some((offset, None))),
+            _ => self.moved.set(Some((offset, Some(now)))),
         }
-        let scrolled = self.moved.get().is_some_and(|(_, t)| now.duration_since(t) < HIDE);
+        let scrolled = self.moved.get().is_some_and(|(_, t)| t.is_some_and(|t| now.duration_since(t) < HIDE));
         if active || scrolled { self.seen.set(Some(now)); }
         let lingering = self.seen.get().is_some_and(|t| now.duration_since(t) < HIDE);
         let target = if active || scrolled || lingering { 1. } else { 0. };

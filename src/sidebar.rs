@@ -149,17 +149,24 @@ impl Workspace {
         let mut fixed = div().flex_none().flex().flex_col().px(px(SB_X));
         let mut list = div().flex().flex_col().px(px(SB_X)).pb(px(8.));
         // Pinned docs are shortcuts: they stay in 我的文档 too.
-        // 置顶 follows the same order as the lists below it. Only the pinned are
-        // sorted: copying and sorting every entry each frame cost 3 ms in a big library.
-        let order = self.home.order();
-        let mut pinned: Vec<&Entry> = self.entries.iter().filter(|e| e.meta.pinned).collect();
-        pinned.sort_by(|a, b| order.cmp(a, b));
+        // 置顶 has an order of its own, dragged by hand (`fdl_core::pins`, `pin_drag`), whatever
+        // the lists below are sorted by. Only the pinned are sorted: copying and sorting every
+        // entry each frame cost 3 ms in a big library.
+        let pinned: Vec<Entry> = fdl_core::pins::sorted(self.entries.iter()).into_iter().cloned().collect();
         if !pinned.is_empty() {
             fixed = fixed.child(self.section(0, crate::settings::text("置顶"), cx));
             if !self.folded[0] {
-                for e in pinned {
-                    fixed = fixed.child(self.doc_row(e, "pinned", 0, false, cx));
+                let ids: Vec<String> = pinned.iter().map(|e| e.id.clone()).collect();
+                let offsets = self.pin_offsets(&ids, window);
+                let mut rows = div().flex().flex_col()
+                    .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| {
+                        if w.folder_drag.pins.active.as_ref().is_some() { w.move_pin_drag(ev.position, ev.pressed_button == Some(MouseButton::Left), window, cx); }
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_pin_click(window, cx)));
+                for (e, off) in pinned.iter().zip(offsets) {
+                    rows = rows.child(self.pin_row(&e.id, off, self.doc_row(e, "pinned", 0, false, cx)));
                 }
+                fixed = fixed.child(rows);
             }
             fixed = fixed.child(div().h(px(GROUP_GAP - SECTION_TOP)));
         }
@@ -167,7 +174,7 @@ impl Workspace {
         // of the tree there; none, a way to open one.
         let tops = self.store.shown_tops();
         if tops.is_empty() {
-            list = list.child(self.empty_home(cx));
+            list = list.child(self.empty_sidebar(cx));
         } else {
             // No 我的文档 heading: the first folder's heading is the sidebar's first row, right under
             // the window's header where 我的文档's was. 批量操作's 已选 N 项 takes the top.
@@ -431,7 +438,7 @@ impl Workspace {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |w, ev: &MouseDownEvent, window, cx| {
+                cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
                     if w.rename.as_ref().is_some_and(|r| r.id == id) {
                         return;
                     }
@@ -443,18 +450,20 @@ impl Workspace {
                         return;
                     }
                     if in_lib { w.arm_folder_drag(&id, ev.position, cx); }
-                    // A 置顶 row opens on press.
-                    else if pinned { w.open(&id, window, cx); }
+                    // A 置顶 row opens when let go without moving, else it is dragged (`pin_drag`).
+                    else if pinned { w.arm_pin_drag(&id, ev.position, cx); }
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
+                cx.listener(move |w, ev: &MouseDownEvent, window, cx| {
                     let batch = in_lib && w.batch.is_some();
                     if batch && !w.batch.as_ref().is_some_and(|b| b.contains(&id2)) && !w.toggle_check(&id2) {
                         return;
                     }
                     w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Anchor::TopLeft, sub: false, batch, from: None });
+                    // the keys go to the sidebar: ⌘Z after what the menu does undoes that, not the page's typing
+                    window.focus(&w.focus, cx);
                     cx.notify();
                 }),
             )
@@ -481,7 +490,7 @@ impl Workspace {
             .child(canvas(move |b, _, _| record.borrow_mut().insert(slot.clone(), b), |_, _, _, _| {}).absolute().inset_0())
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |w, _: &MouseDownEvent, _, cx| {
+                cx.listener(move |w, _: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     // The row menu's outside-click handler has already closed it on this press, so
                     // a press on its own button closes it rather than reopening it (see `open`).
@@ -491,6 +500,7 @@ impl Workspace {
                     let menu_h = row_menu_height(ROW_ITEMS + usize::from(w.takes_children(&id)), ROW_DIVIDERS);
                     let (pos, corner) = crate::design::hang(b, crate::design::Align::Start, Some(menu_h));
                     w.row_menu = Some(RowMenu { id: id.clone(), pos, corner, sub: false, batch: false, from: Some(from.clone()) });
+                    window.focus(&w.focus, cx);
                     cx.notify();
                 }),
             )
@@ -585,7 +595,7 @@ impl Workspace {
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .mr(px(give))
-                .text_color(if heading { Theme::sidebar_section() } else if drop_target || selected { Theme::text() } else { Theme::sidebar_text() })
+                .text_color(if heading { Theme::sidebar_section() } else if drop_target || selected { Theme::sidebar_text_on() } else { Theme::sidebar_text() })
                 .when(heading, |d| d.font_weight(FontWeight::SEMIBOLD))
                 .child(ui_text(display_title(&e.title)))
                 .into_any_element(),
@@ -605,7 +615,7 @@ impl Workspace {
                         w.folder_drag.icon_press = true;
                         w.folder_drag.icon_alt = ev.modifiers.alt;
                     }))
-                    .child(icon(if open { "chevron-down" } else { "chevron-right" }, 12., Theme::text_caption())))
+                    .child(icon(if open { "chevron-down" } else { "chevron-right" }, 12., Theme::sidebar_chevron())))
                 .into_any_element()
         } else { title };
         let renaming = self.rename.as_ref().is_some_and(|r| r.id == e.id);
@@ -753,10 +763,10 @@ impl Workspace {
             .child(
                 item("rm-window", "copy", crate::settings::text("在新窗口中打开"))
                     .on_hover(set_sub(false))
-                    .on_click(cx.listener(move |w, _, _, cx| {
+                    .on_click(cx.listener(move |w, _, window, cx| {
                         w.row_menu = None;
-                        let id = new_window.clone();
-                        cx.defer(move |cx| crate::quick_note::open_document(Some(id), cx));
+                        let (id, opener) = (new_window.clone(), w.opener(window));
+                        cx.defer(move |cx| crate::quick_note::open_document(Some(id), opener, cx));
                         cx.notify();
                     })),
             )

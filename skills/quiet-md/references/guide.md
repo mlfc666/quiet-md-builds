@@ -1,7 +1,7 @@
 # quiet: the Quiet.md library for agents
 
 `quiet` reads, searches and edits a Quiet.md library: a folder of documents
-(`.xml` DocxXML and `.md` Markdown), boards (`.excalidraw`) and 数据表
+(`.xml` DocxXML and `.md` Markdown), boards (`.excalidraw`) and 数据库
 (`.sqlite`). `quiet guide` prints this guide as the installed `quiet` knows
 it; `quiet help COMMAND` shows one command in detail.
 
@@ -65,6 +65,14 @@ quiet set DOC#REF [--text TEXT] [--done|--undone] [--kind text|h1..h6|bullet|ord
 quiet rename DOC TITLE
 quiet mv DOC FOLDER          (within the document's top folder; its name alone: its top)
 quiet rm DOC                 to the trash (kept 30 days)
+quiet duplicate DOC [TITLE]  a copy beside it ("<title> 副本")
+quiet pin|unpin DOC          the sidebar's 置顶 list
+
+quiet folders                the folders the app's sidebar lists (name, path, key, default)
+quiet folders add PATH [--force]     open a folder there, where it is (nothing copied)
+quiet folders remove NAME|PATH|KEY   off the sidebar; its files stay
+quiet open DOC[#REF]         show it in the app, scrolled to that block and selected (launches the app)
+quiet open --folder FOLDER | --trash   a folder's page, or the trash;  quiet new … --open: open what it made
 
 quiet table DOC[#REF] [--table T] [--view V] [--where 'FIELD OP VALUE']… [--any] [--sort F[:desc]]… [--group F]…
                  [--fields A,B] [--stats [sum,…]] [--as json|csv|md] [--limit N] [--offset N]
@@ -85,7 +93,8 @@ quiet history DOC [VERSION]  versions kept (1 = newest), or what changed since o
 quiet restore DOC VERSION    put DOC back as it was (undoable: the current text is kept first)
 quiet trash                  what is in the trash
 quiet untrash NAME           bring a document back
-quiet import FILE… [--in FOLDER]   .md/.txt, .xml, .csv/.tsv (as a 数据表), .excalidraw
+quiet import FILE… [--in FOLDER]   .md/.txt, .xml, .csv/.tsv (as a 数据库), .excalidraw
+quiet guide import [--in FOLDER] [--lang zh|en]   Quiet.md's 开始指南 as a new folder
 
 quiet run [FILE|-] [-e CODE] [--timeout SECS]
 quiet call OP [JSON]         any operation by name, as run's lib calls it
@@ -100,17 +109,17 @@ moves and show as backlinks) are written `[[path or title]]`, e.g.
 becomes one too. `[[…]]` looks in the document's own top folder first (a
 new document's: the one it lands in), then in the others; a name only one
 other document has is that one, and several are `ambiguous` (the error lists
-them by path and id: write the id, `[[id]]`, or the path from 主页).
+them by path and id: write the id, `[[id]]`, or the full path).
 Reading as Markdown writes mentions back as `[[path]]`, or as `[[id]]` when
 the path would find another document from here, so copied sections keep
 their links.
 **Where the library is.** Every folder the user has open in Quiet.md on
-this computer: the top folders on its 主页 (Home). Paths start there: the
+this computer: its top folders. Paths start with one of them: the
 first part is the top folder's name (any case), e.g. `Quiet.md/工作/周报`;
 `quiet ls` lists the top folders, where each is on disk, and why one is
 unavailable. Every path the CLI prints is such a path. A path or title only
 one document has works without the top folder; one that several have is
-`ambiguous`, listing them by path: pass the path from 主页, or the id from
+`ambiguous`, listing them by path: pass the full path, or the id from
 `ls --json`. Two top folders of one name: the error lists them with their
 keys; a key works as the first part instead of the name. New documents,
 folders and imports go into the `--in` folder, else the first top folder,
@@ -124,7 +133,7 @@ Kinds of blocks: text, h1…h9, bullet, ordered, todo, code, quote, callout,
 divider, image, table, grid, column, file, board, datatable, countdown,
 subpages, raw:TAG (kept verbatim).
 
-**数据表.** Rows have lasting ids (`r12`). Values are text as the app shows
+**数据库.** Rows have lasting ids (`r12`). Values are text as the app shows
 them and are written as if pasted: numbers, dates, `true`/`false` for
 checkboxes, select options (missing ones are added), several options joined
 with commas, a link (关联) as the other table's first-field text or `r12`.
@@ -166,6 +175,19 @@ text inside a shape is its label, listed with it. Place new shapes beside
 the current bounds.
 A new board: `quiet new 架构图 --kind board`.
 
+## The app
+
+`quiet folders add` / `remove` change the sidebar's list as 添加文件夹 / 从侧栏移除
+do; a running app follows within a couple of seconds. A folder that is a code
+project or holds a great many files fails with `confirm` (the app asks first):
+ask the user, then pass `--force`. A disk's top, the home folder or a system
+folder is refused (`too_broad`).
+
+`quiet open` hands the app a `quietmd://` link, which only navigates: use it
+to show the user what you wrote (`quiet open 周报#风险` after an insert there).
+It changes nothing in the library. `--dry-run` prints the link without
+opening it.
+
 ## Script API
 
 Write the script to a file and run `quiet run script.js`; short ones go in
@@ -180,7 +202,7 @@ Top-level `await` and `return` work; a returned value is printed. `help()` and
 - `lib.mkdir(name, {folder})`
 - `lib.check()` → `{documents, issues: [{path, code, message}]}`
 - `lib.trash()` → `[{id, title, folder, deleted}]`; `lib.untrash(name)`
-- `lib.call(op, args)` → any operation, as `quiet call`
+- `lib.call(op, args)` → any operation, as `quiet call`; `load` is the one `lib.doc` uses (a document's path, title, rev… loaded into the script). It used to be called `open`, a name that still works for one more version, with a warning; `quiet open` is something else: it shows a document in the app
 - `doc.path`, `doc.title`, `doc.kind`, `doc.rev`, `doc.block_count`
 - `doc.outline()` → `{headings: [{ref, level, text, chars}], top?, chars, …}`
 - `doc.blocks({kind, grep, done, within})` → `[{ref, id, kind, text, depth, level?, done?, children?}]`
@@ -190,7 +212,7 @@ Top-level `await` and `return` work; a returned value is printed. `help()` and
 - `doc.append(md)`, `doc.prepend(md)`
 - `doc.replace(ref, md, {section})`, `doc.remove(ref, {section})`, `doc.move(ref, where, {section})`
 - `doc.setText(ref, text)` (inline Markdown), `doc.setDone(ref, done = true)`, `doc.setKind(ref, kind)`
-- `doc.rename(title)`, `doc.moveTo(folder)`, `doc.trash()` — applied when the script ends
+- `doc.rename(title)`, `doc.moveTo(folder)`, `doc.trash()`, `doc.duplicate(title?)`, `doc.pin(on = true)` — applied when the script ends
 - `doc.links()` → `{out: [{to, broken, text}], back: [{from, title, text}]}` (out: as edited in this script; back: as on disk)
 - `doc.table({at, table, view, where, any, sort, group, fields, stats, as, limit, offset})` → `{fields, schema, views, tables, total, rows: [{_id, field: text}], groups?, stats?, text?}` (every value is a string: `Number(r.评分)` to compare; `where`: `"状态 = 在读"`, `{field, op, value}` or a list; `sort`/`group`: `"F:desc"` or a list; `as: "csv"|"md"` gives `text`)
 - `doc.addRows([{field: value}], {at, table})` → `["r13", …]`; `doc.updateRow(row, {field: value})`; `doc.updateRows([{_id, field: value}])`; `doc.deleteRows(rows)`
@@ -210,7 +232,7 @@ The script runs in a sandbox: no files, network or processes, only `lib`
 (so no `import`; run `quiet import` from the shell). It stops after 60 s
 (`--timeout`). A document or board made with `lib.create` can be read and
 edited in the same script; it is written when the script ends (so it cannot
-be mentioned with `[[…]]` until the next run). A new 数据表 can be filled from
+be mentioned with `[[…]]` until the next run). A new 数据库 can be filled from
 the next run. Renames, moves and trashing also take effect when the script
 ends, so later reads in the same script see the old paths.
 
@@ -252,7 +274,7 @@ for (const t of doc.blocks({ kind: "todo", done: false, grep: "导出" })) doc.s
 return doc.blocks({ kind: "todo", done: false }).map(t => t.text);
 ```
 
-Mark finished books in a 数据表 and count what is left:
+Mark finished books in a 数据库 and count what is left:
 
 ```js
 const books = lib.doc("书单");
@@ -260,7 +282,7 @@ books.updateWhere("进度 = 100%", { 状态: "读完" });
 return books.table({ where: "状态 != 读完", limit: 0 }).total;
 ```
 
-Give a 数据表 a 看板 of what is being read, with a score column:
+Give a 数据库 a 看板 of what is being read, with a score column:
 
 ```sh
 quiet table field add 书单 评分 --type rating --format stars=5

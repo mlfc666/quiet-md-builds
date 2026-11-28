@@ -357,7 +357,7 @@ pub fn font_changed(cx: &mut App) {
     }
     if !c.ok {
         if pending.is_some() && let Some(w) = ws {
-            let msg = crate::localized_format!("{} 下载失败，仍用原来的字体：{}", "Could not download {}; the font in use stays: {}", e.name(), c.error.clone().unwrap_or_default());
+            let msg = crate::localized_format!("{} 下载失败，继续使用原来的字体：{}", "Downloading {} failed; the current font stays: {}", e.name(), c.error.clone().unwrap_or_default());
             let _ = w.update(cx, |ws, _, cx| ws.show_toast_kind(ui::ToastKind::Error, &msg, cx));
         }
         return;
@@ -396,13 +396,6 @@ pub fn apply_appearance(pref: &str) {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = pref;
-}
-
-/// 关于 › 首次启动引导's note, its shortcut spelled as this platform binds it (cmd-alt-shift-o is
-/// Ctrl+Alt+Shift+O off the Mac); every translation carries the Mac glyphs, swapped here.
-fn onboarding_note() -> String {
-    let note = tr("在这个窗口上再走一遍首次启动的欢迎页（⌘⌥⇧O）；只会应用快捷键，不改动文档库", "Go through the first-launch pages again over this window (⌘⌥⇧O); only the shortcut is applied, the library stays as it is");
-    if cfg!(target_os = "macos") { note.to_string() } else { note.replace("⌘⌥⇧O", "Ctrl+Alt+Shift+O") }
 }
 
 /// Draw light or dark as the preference and the system say; true when the look changed.
@@ -1292,12 +1285,12 @@ impl Workspace {
         use crate::font_downloads as fd;
         let Some(e) = fd::entry(id) else { return };
         if let Err(err) = fd::delete(id) {
-            return self.show_toast_kind(ui::ToastKind::Error, &format!("{}: {err}", tr("删除失败", "Could not delete")), cx);
+            return self.show_toast_kind(ui::ToastKind::Error, &format!("{}: {err}", tr("删除失败", "Deleting failed")), cx);
         }
         if prefs().doc_family.eq_ignore_ascii_case(&e.family) { self.set_pref(|p| p.doc_family.clear(), cx); }
-        let msg = if id == fd::XIAOLAI { tr("已删除。画板需要中文手写字体时会重新下载。", "Deleted. Boards download the handwriting font again when they need it.").to_string() }
-            else { crate::localized_format!("已删除 {}", "Deleted {}", e.name()) };
-        self.show_toast_kind(ui::ToastKind::Success, &msg, cx);
+        let t = if id == fd::XIAOLAI { crate::design::Toast::new(ui::ToastKind::Success, tr("已删除", "Deleted")).description(tr("画板需要中文手写字体时会重新下载", "Boards download the handwriting font again when they need it")) }
+            else { crate::design::Toast::new(ui::ToastKind::Success, crate::localized_format!("已删除 {}", "Deleted {}", e.name())) };
+        self.show_toast_with(t, cx);
     }
 
     /// Keys while a 通用 dropdown is open; true when used.
@@ -1389,7 +1382,7 @@ impl Workspace {
         let mut p = old.clone();
         f(&mut p);
         if let Err(e) = save(&p) {
-            self.show_toast_kind(ui::ToastKind::Error, &format!("{}: {e}", tr("设置保存失败", "Could not save settings")), cx);
+            self.show_toast_kind(ui::ToastKind::Error, &format!("{}: {e}", tr("设置保存失败", "Saving settings failed")), cx);
             return;
         }
         // 匿名使用统计 off: forget the app's id and waiting days.
@@ -1469,7 +1462,7 @@ impl Workspace {
         };
         div().w(px(self.sidebar_w(window))).h_full().flex_none().flex().flex_col().text_color(Theme::text()).font_family(theme::ui_family())
             // The document sidebar's header, 返回 where 添加文件夹 is: the toggle doesn't move.
-            .child(self.sidebar_header(crate::ui::header_icon("settings-back", "arrow-left").relative().child(self.home.track("settings-back")).tip(tr("返回", "Back"), Some("Esc"))
+            .child(self.sidebar_header(crate::ui::header_icon("settings-back", "arrow-left").relative().child(self.folder_page.track("settings-back")).tip(tr("返回", "Back"), Some("Esc"))
                 .on_click(cx.listener(|w, _, _, cx| w.close_settings(cx))), cx))
             // The document sidebar's rhythm: 设置 sits where the first folder's heading does, a
             // row right under the bar, and the rows follow `ROW_GAP` apart.
@@ -1782,14 +1775,14 @@ impl Workspace {
                 row(tr("回收站", "Trash"), Some(crate::localized_format!("删除的文档保留 {} 天后自动清除。", "Deleted documents are kept for {} days.", self.store.trash_days()).into()),
                     button("open-trash", tr("打开", "Open")).on_click(cx.listener(|w, _, _, cx| w.show_view(View::Trash, cx)))).into_any_element(),
                 // #237: files no document (the Trash included) mentions.
-                row(tr("未使用资源", "Unused assets"), Some(tr("资源文件夹里没有任何文档（含回收站、版本历史和本机文件）引用的图片和文件。检查后确认才会移出。", "Images and files in the asset folder that no document mentions, including the Trash, version history and local files. Nothing is moved until you confirm.").into()),
+                row(tr("未使用资源", "Unused assets"), Some(tr("资源文件夹里没有任何文档（含回收站、版本历史和单独打开过的文件）引用的图片和文件。检查后确认才会移出。", "Images and files in the asset folder that no document mentions, including the Trash, version history and files opened on their own. Nothing is moved until you confirm.").into()),
                     button("sweep-assets", tr("检查", "Check")).on_click(cx.listener(|w, _, window, cx| {
                         let root = crate::store::Store::active_dir();
                         let (live, outside) = w.sweep_inputs(window, cx);
                         cx.spawn(async move |this, cx| {
                             let sweep = cx.background_executor().spawn(async move { crate::store::Store::unused_assets_at(root, live, outside) }).await;
                             let _ = this.update(cx, |w, cx| match sweep {
-                                Ok(files) if files.is_empty() => w.show_toast(crate::settings::text("没有未使用资源"), cx),
+                                Ok(files) if files.is_empty() => w.show_toast_kind(ui::ToastKind::Info, crate::settings::text("资源都在使用中"), cx),
                                 Ok(files) => { w.confirm = Some(crate::app::Confirm::RemoveUnused(files)); cx.notify(); }
                                 Err(e) => w.sweep_failed(&e, cx),
                             });
@@ -1813,10 +1806,11 @@ impl Workspace {
             .child(div().text_size(px(theme::ui_font())).line_height(px(theme::ui_font() + 7.)).text_color(Theme::text_caption()).child(if cfg!(target_os = "macos") { tr("本地优先的笔记应用：无需账号，文档就是你电脑上的文件。", "Local-first notes: no account, your documents are files on your Mac.") }
                 else { tr("本地优先的笔记应用：无需账号，文档就是你电脑上的文件。", "Local-first notes: no account, your documents are files on your computer.") })))
             .child(group("group-update", None, vec![update_row(cx).into_any_element()]))
+            // The guides of this version beside the ones there are (a first launch's, maybe older).
+            .child(group("group-guide", None, vec![row(tr("开始指南", "Getting started"), desc(tr("把这个版本的开始指南放进一个新文件夹，已有的指南和文档不变。", "Puts this version’s guide in a new folder; your existing guides and documents stay as they are.")),
+                button("import-guide", tr("导入最新的开始指南", "Import the latest guide")).on_click(cx.listener(|w, _, window, cx| w.import_guides(window, cx)))).into_any_element()]))
             .child(group("group-repo", None, vec![row(tr("项目主页", "Project page"), Some(REPO.trim_start_matches("https://").into()),
                 button("open-repo", tr("打开", "Open")).on_click(|_, _, cx| crate::editor::open_link(cx, REPO))).into_any_element()]))
-            .child(group("group-onboarding", None, vec![row(tr("首次启动引导", "Onboarding"), Some(onboarding_note().into()),
-                button("replay-onboarding", tr("打开", "Open")).on_click(cx.listener(|w, _, window, cx| w.replay_onboarding(window, cx)))).into_any_element()]))
             .into_any_element()
     }
 }
@@ -2108,7 +2102,7 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "搜索目标位置" => "Search destinations",
         "移动成功" => "Moved successfully",
         "无搜索结果" => "No results",
-        "从 我的文档 移动到" => "Move from My documents to",
+        "移动到…" => "Move to…",
         "信息与数据" => "Information and data",
         "概览" => "Overview",
         "最近修改" => "Last modified",
@@ -2116,13 +2110,13 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "总字数" => "Words",
         "总字符数" => "Characters",
         "大小" => "Size",
-        "当前系统不支持" => "Not supported on this platform",
         "打印超时，请稍后重试" => "Printing timed out. Please try again.",
         "打印失败，请重试" => "Printing failed. Please try again.",
         "需要 Microsoft Edge WebView2 运行时" => "Requires the Microsoft Edge WebView2 Runtime",
         "没有找到匹配的结果，尝试其他关键词进行搜索" => "No results. Try another search term.",
         "请先关闭正在编辑这些文档的其他窗口，再删除" => "Close other windows editing these documents before deleting them.",
         "删除成功" => "Deleted successfully",
+        "资源都在使用中" => "All assets are in use",
         "已添加到“置顶”" => "Pinned",
         "已从“置顶”移除" => "Unpinned",
         "保存失败" => "Save failed",
@@ -2140,14 +2134,11 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "回收站暂无内容" => "Trash is empty",
         "位置" => "Location",
         "剩余时间" => "Time remaining",
-        "恢复成功。部分文档由于原位置不存在，已恢复到“我的文档”" => "Restored. Some documents were moved to My documents because their original location no longer exists.",
         "恢复成功" => "Restored successfully",
         "已彻底删除" => "Permanently deleted",
         "清空" => "Empty",
         "已清空回收站" => "Trash emptied",
         "清理未使用资源" => "Remove unused assets",
-        "没有未使用资源" => "No unused assets",
-        "没有可清理的资源" => "Nothing to remove",
         "移出" => "Move out",
         "确认清空回收站？" => "Empty the Trash?",
         "删除的内容将进入回收站，30 天后自动彻底删除" => "Deleted items will be moved to Trash and permanently deleted after 30 days.",
@@ -2175,7 +2166,6 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "本文暂未被其它文档引用" => "No backlinks yet",
         "本文暂未引用其它文档" => "No linked documents yet",
         "查看更多" => "Show more",
-        "当前为阅读模式，请切换为编辑模式后重试" => "Switch to editing mode to make changes.",
         "表情符号" => "Emoji",
         "动物" => "Animals",
         "食物" => "Food",
@@ -2189,7 +2179,6 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "输入“/”快速插入内容" => "Type / to insert content",
         "点击更换图标" => "Click to change icon",
         "请输入标题" => "Enter a title",
-        "请输入有效的链接。" => "Enter a valid link.",
         "确认" => "Confirm",
         "文本" => "Text",
         "复制原始网页链接" => "Copy original link",
@@ -2216,8 +2205,6 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "文件不存在" => "File not found",
         "文件夹不存在" => "Folder not found",
         "这个文件夹在文档库里，它的内容已经在我的文档中" => "This folder is inside the library; its notes are already in My documents",
-        "这个文件夹里有文档库，不能作为本机文件夹打开" => "This folder holds the library, so it can't be opened as a folder on this computer",
-        "本机文件夹和文档库之间只能复制，不能移动" => "Between folders on this computer and the library, notes can be copied but not moved",
         "加载失败，" => "Could not load. ",
         "点击重试" => "Retry",
         "图片过小，请放大后重试" => "Image too small. Enlarge it and try again.",
@@ -2275,7 +2262,6 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "提前 1 周 (09:00)" => "1 week before (09:00)",
         "当天 (18:00)" => "Same day (18:00)",
         "明天" => "Tomorrow",
-        "该提醒已被删除。" => "This reminder was deleted.",
         "设置时间" => "Set time",
         "提醒" => "Reminder",
         "收起目录" => "Hide table of contents",
@@ -2355,7 +2341,6 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "取消静音" => "Unmute",
         "静音" => "Mute",
         "预览" => "Preview",
-        "无法播放该音频" => "Cannot play this audio",
         "全屏" => "Full screen",
         "文本视图" => "Text view",
         "卡片视图" => "Card view",
@@ -2364,7 +2349,7 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "文件读取失败" => "Could not read file",
         "未命名文档" => "Untitled",
         "画板" => "Board",
-        // 数据表
+        // 数据库
         "查看" => "Open",
         "退出全屏" => "Exit full screen",
         "上周" => "Last week",
@@ -2396,14 +2381,16 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "关联" => "Link",
         "关联到" => "Link to",
         "关联字段" => "Link field",
-        "关联的数据表" => "Linked table",
+        "关联的数据库" => "Linked database",
         "具体日期" => "Exact date",
         "冻结至此字段/列" => "Freeze up to this field",
         "函数" => "Functions",
         "分组" => "Group",
         "创建于" => "Created",
         "删除字段/列" => "Delete field",
-        "删除数据表" => "Delete table",
+        "主字段作为记录标题保留" => "Kept as each record’s title",
+        "撤销可以恢复。" => "Undo brings it back.",
+        "删除数据库" => "Delete database",
         "删除视图" => "Delete view",
         "删除记录" => "Delete record",
         "删除选项" => "Delete option",
@@ -2439,7 +2426,7 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "字段格式" => "Format",
         "字段类型" => "Field type",
         "字段配置" => "Fields",
-        "导入 CSV 为新数据表" => "Import CSV as new table",
+        "导入 CSV 为新数据库" => "Import CSV as new database",
         "导出为 CSV" => "Export as CSV",
         "小于" => "Less than",
         "小于或等于" => "Less than or equal",
@@ -2460,15 +2447,15 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "搜索记录" => "Search records",
         "数字" => "Number",
         "数字格式" => "Number format",
-        "数据表" => "Data table",
+        "数据库" => "Database",
         "整数" => "Integer",
         "新增字段" => "Add field",
         "新增记录" => "Add record",
-        "新建数据表" => "New table",
+        "新建数据库" => "New database",
         "新建视图" => "New view",
         "新建选项" => "Create option",
         "新记录默认填入创建日期" => "Default to the creation date",
-        "无法读取数据表" => "Could not read the data table",
+        "无法读取数据库" => "Could not read the database",
         "无结果" => "No results",
         "日历" => "Calendar",
         "日历视图" => "Calendar view",
@@ -2485,7 +2472,7 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "最晚" => "Latest",
         "未分类" => "Uncategorized",
         "未勾选" => "Unchecked",
-        "未命名数据表" => "Untitled data table",
+        "未命名数据库" => "Untitled database",
         "未命名记录" => "Untitled record",
         "未填写" => "Empty",
         "未填写占比" => "Percent empty",
@@ -2507,7 +2494,7 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "整页打开" => "Open as a page",
         "新建笔记" => "New note",
         "没有笔记" => "No notes",
-        "独立的数据表才能加笔记列" => "Only a data table of its own can have a note column",
+        "独立的数据库才能加笔记列" => "Only a database of its own can have a note column",
         "空笔记" => "Empty",
         "笔记" => "Note",
         "欧元" => "Euro",
@@ -2557,11 +2544,11 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "设置行高" => "Row height",
         "评分" => "Rating",
         "请先添加关联字段" => "Add a link field first",
-        "已删除的数据表" => "Deleted table",
+        "已删除的数据库" => "Deleted database",
         "是" => "Yes",
         "否" => "No",
         "已删除的字段" => "Deleted field",
-        "这个字段来自有多张数据表的旧文件：它照常显示，设置不能再修改。" => "This field comes from an older file with several tables. It still shows its values, but its settings can no longer be changed.",
+        "这个字段来自有多张表的旧文件：它照常显示，设置不能再修改。" => "This field comes from an older file with several tables. It still shows its values, but its settings can no longer be changed.",
         "请输入" => "Enter",
         "请输入字段标题" => "Field name",
         "请输入选项" => "Option name",
@@ -2658,6 +2645,15 @@ fn diagnostic_for(message: &str, english: bool) -> String {
         ("这篇文档还在从 iCloud 下载，请稍后再打开", "This document is still downloading from iCloud. Open it again in a moment."),
         ("恢复文档 {} 失败，已恢复的文档保留在文档库", "Could not restore document {}. Documents already restored remain in Documents."),
         ("文档已恢复，回收站索引清理失败：{}", "Document restored, but the Trash index could not be cleaned up: {}"),
+        // 移到另一个顶层文件夹（core across.rs）
+        ("已在这个文件夹里", "Already in this folder"),
+        ("不能移动到自身或后代文件夹中", "A folder can't move into itself or a folder inside it"),
+        ("已存在同名文件：{}", "A file with this name is already there: {}"),
+        ("文档或文件夹不存在", "This page or folder is no longer here"),
+        ("旧格式的文档库没有真实文件夹", "Move the library to real folders first"),
+        ("单独打开的文件只能复制进文件夹", "A file opened on its own is copied into a folder, not moved"),
+        ("目标位置已改变，请重试", "The folder changed. Try again."),
+        ("目标文件夹里已有相同编号的文档", "That folder already has a page with this ID"),
     ];
     for (source, target) in TEMPLATES {
         let parts: Vec<_> = source.split("{}").collect();
@@ -2717,12 +2713,14 @@ mod localization_tests {
         assert_eq!(diagnostic_for(source, false), source);
         assert_eq!(diagnostic_for(source, true), "Could not remove expired Trash document 我的笔记.xml: Permission denied");
         assert_eq!(diagnostic_for("文档索引已损坏，已从备份恢复（原文件保留为 index.json.bad）", true), "Document index was damaged and restored from backup (original retained as index.json.bad).");
+        assert_eq!(diagnostic_for("已存在同名文件：项目/甲.xml", true), "A file with this name is already there: 项目/甲.xml");
+        assert_eq!(diagnostic_for("目标位置已改变，请重试", true), "The folder changed. Try again.");
         assert_eq!(diagnostic_for("unknown OS error", true), "unknown OS error");
     }
 
     #[test]
     fn user_titles_are_never_translation_keys() {
-        for title in ["主页", "收藏", "未命名文档", "My notes", "我的中文笔记"] { assert_eq!(display_title(title), title); }
+        for title in ["收藏", "未命名文档", "My notes", "我的中文笔记"] { assert_eq!(display_title(title), title); }
     }
 }
 

@@ -64,13 +64,13 @@ impl Session {
 
     /// Every top-level folder's 回收站 (each top-level folder keeps its own), as (top-level folder key, entry).
     fn all_trash(&mut self) -> Vec<(String, fdl_core::store::TrashEntry)> {
-        self.ws.folders.iter_mut().filter_map(|r| Some((r.key.clone(), r.store.as_mut()?)))
+        self.tops.folders.iter_mut().filter_map(|r| Some((r.key.clone(), r.store.as_mut()?)))
             .flat_map(|(k, s)| s.list_trash().into_iter().map(move |t| (k.clone(), t))).collect()
     }
 
     pub(crate) fn trash_list(&mut self) -> R<Value> {
         let list: Vec<Value> = self.all_trash().iter().map(|(k, t)| json!({ "id": t.id, "title": t.title, "folder": self.top_name(k), "deleted": date_ms(t.deleted * 1000) })).collect();
-        let days = self.ws.folders.iter().find_map(|r| r.store.as_ref()).map_or(fdl_core::store::TRASH_DAYS, |s| s.settings().trash_days());
+        let days = self.tops.folders.iter().find_map(|r| r.store.as_ref()).map_or(fdl_core::store::TRASH_DAYS, |s| s.settings().trash_days());
         Ok(json!({ "days": days, "items": list }))
     }
 
@@ -96,10 +96,42 @@ impl Session {
         kind_of_file(&path)?;
         let (top, folder) = self.landing(arg(a, "folder"))?;
         let to = self.folder_rel(folder.as_deref());
-        let shown = self.home_path(&top, &to);
+        let shown = self.full_path(&top, &to);
         self.pending.push(Pending::Import { top, path: path.clone(), folder: Some(to).filter(|t| !t.is_empty()) });
         Ok(json!({ "path": path.display().to_string(), "import": true, "to": shown }))
     }
+}
+
+impl Session {
+    /// `quiet guide import`: this build's 开始指南 as a new folder (numbered when the name is
+    /// taken) at the top of the top-level folder `--in` names, else the one Quiet.md first put
+    /// them in (the default library), else the first; in `--lang zh|en`, else Quiet.md's language.
+    pub(crate) fn guide_import(&mut self, a: &Value) -> R<Value> {
+        let top = match arg(a, "folder") {
+            Some(spec) => match self.landing(Some(spec))? {
+                (top, None) => top,
+                _ => return Err(fail("usage", "the guide goes to the top of a top-level folder")).map_err(|f| f.hint("pass one of the folders `quiet ls` lists, e.g. --in Quiet.md")),
+            },
+            None => { let home = Store::legacy_dir(); match self.tops.folders.iter().find(|r| r.store.is_some() && r.path == home) { Some(r) => r.key.clone(), None => self.landing(None)?.0 } }
+        };
+        let chinese = match arg(a, "lang") {
+            Some("zh") => true,
+            Some("en") => false,
+            Some(l) => return Err(fail("usage", format!("no guide in {l:?}")).hint("--lang zh or --lang en")),
+            None => app_language_is_chinese(),
+        };
+        let name = fdl_core::guides::folder_name(chinese);
+        self.pending.push(Pending::ImportGuides { top: top.clone(), chinese });
+        Ok(json!({ "path": self.full_path(&top, name), "guide": if chinese { "zh" } else { "en" } }))
+    }
+}
+
+/// Quiet.md's interface language is 简体中文 (its preferences, as the app reads them):
+/// the guide it would import is the Chinese one.
+fn app_language_is_chinese() -> bool {
+    let prefs = [Store::settings_dir(), Store::legacy_dir().join(".quiet")].map(|d| d.join("preferences.json"));
+    let Some(p) = prefs.iter().find_map(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return false };
+    match p.get("language").and_then(Value::as_str).filter(|l| !l.is_empty()) { Some(l) => l == "zh", None => p.get("english").and_then(Value::as_bool) == Some(false) }
 }
 
 enum FileKind { Markdown, DocxXml, Csv, Board }

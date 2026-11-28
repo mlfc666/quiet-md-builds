@@ -10,46 +10,8 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
     svg().path(SharedString::from(format!("icons/{name}.svg"))).size(px(size)).flex_none().text_color(color)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ToastKind {
-    Success,
-    Error,
-    Info,
-}
-
-/// Toast: `design::Toast` 32px below the top, centred. It lasts 3s and fades over
-/// its last .3s; None once it is over.
-pub fn toast_el(kind: ToastKind, msg: &SharedString, t0: web_time::Instant, window: &mut Window) -> Option<AnyElement> {
-    let e = t0.elapsed().as_secs_f32();
-    if e >= 3. {
-        return None;
-    }
-    let op = if e > 2.7 {
-        window.request_animation_frame();
-        (3. - e) / 0.3
-    } else {
-        1.
-    };
-    let tone = match kind {
-        ToastKind::Success => crate::design::ToastTone::Success,
-        ToastKind::Error => crate::design::ToastTone::Error,
-        ToastKind::Info => crate::design::ToastTone::Info,
-    };
-    let vw = window.viewport_size().width;
-    let card = crate::design::Toast::new(tone, crate::settings::label(msg));
-    Some(
-        deferred(
-            anchored()
-                .position_mode(AnchoredPositionMode::Window)
-                .position(point(px(0.), px(32.)))
-                .child(div().w(vw).flex().justify_center().opacity(op).child(card)),
-        )
-        .with_priority(20)
-        .into_any_element(),
-    )
-}
-
-
+/// A toast's tone (`design::toast`).
+pub use crate::design::ToastTone as ToastKind;
 
 /// Column headers of the page lists: tertiary text (measured #88898B on
 /// the name / last-viewed / created columns).
@@ -63,7 +25,7 @@ pub fn list_line() -> Hsla {
 }
 
 /// The quiet list hover: a rounded fill that hides the row's own hairline
-/// at once (the one below follows `Home::list_hover`, see [`row_line`]).
+/// at once (the one below follows `FolderPage::list_hover`, see [`row_line`]).
 pub fn row_hover(s: StyleRefinement) -> StyleRefinement {
     s.bg(Theme::fill_hover()).border_color(transparent_black()).rounded(px(ROW_RADIUS))
 }

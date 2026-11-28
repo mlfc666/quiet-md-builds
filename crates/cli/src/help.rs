@@ -14,7 +14,7 @@ pub const HELP: &str = "quiet — read, search, edit and script a Quiet.md libra
   quiet links DOC                        mentions out of and into DOC
   quiet check                            broken links, unreadable files, unused assets
 
-  quiet new TITLE [--in FOLDER] [--md TEXT|-] [--kind doc|md|board|table]
+  quiet new TITLE [--in FOLDER] [--md TEXT|-] [--kind doc|md|board|table] [--open]
   quiet mkdir NAME [--in FOLDER]
   quiet insert DOC [--after|--before|--into|--end-of REF | --start | --end] --md TEXT|-
   quiet replace DOC#REF [--section] --md TEXT|-
@@ -22,8 +22,10 @@ pub const HELP: &str = "quiet — read, search, edit and script a Quiet.md libra
   quiet move DOC#REF --after|--before|--into REF [--section]
   quiet set DOC#REF [--text TEXT] [--done|--undone] [--kind K]
   quiet rename DOC TITLE | quiet mv DOC FOLDER | quiet rm DOC
+  quiet duplicate DOC [TITLE]            a copy beside it (\"TITLE 副本\")
+  quiet pin|unpin DOC                    the sidebar's 置顶 list
 
-  quiet table DOC[#REF] [--view V] [--where 'F OP V']…   a 数据表's rows, filtered
+  quiet table DOC[#REF] [--view V] [--where 'F OP V']…   a 数据库's rows, filtered
   quiet table add|update|delete|import …  rows;  table field|view|new|rename|remove … its shape
   quiet board DOC[#REF]                  a 画板's elements; board add|rm …
   quiet history DOC [VERSION]            saved versions, or what changed since one
@@ -31,15 +33,19 @@ pub const HELP: &str = "quiet — read, search, edit and script a Quiet.md libra
   quiet trash | quiet untrash NAME       the trash, and bringing a document back
   quiet import FILE… [--in FOLDER]       Markdown, DocxXML, CSV, .excalidraw
 
+  quiet folders [add PATH | remove NAME] the folders Quiet.md's sidebar lists
+  quiet open DOC[#REF] | --folder F | --trash   show it in Quiet.md, at that block
+
   quiet run [FILE|-] [-e CODE]           a JavaScript script, as one transaction
   quiet call OP [JSON]                   any operation by name (what run's lib calls)
   quiet mcp                              serve these as MCP tools on stdio
   quiet guide                            the full guide for agents (script API included)
+  quiet guide import [--in FOLDER] [--lang zh|en]   the 开始指南 as a new folder
   quiet help COMMAND                     one command in detail
   quiet telemetry [on|off|status]        the anonymous daily usage counts
 
 Writes take --dry-run (show the diff, write nothing) and --expect-rev REV.
-Paths start at 主页 (Home): the first part is one of the folders Quiet.md
+Paths start with a top-level folder: the first part is one of the folders Quiet.md
 has open on this computer (`quiet ls` lists them), e.g. Quiet.md/工作/周报.
 DOC is such a path (extension optional), a path or title only one document
 has, or an id. REF is what outline/blocks print (#3~k7f2: position and
@@ -58,7 +64,7 @@ skill: npx skills add s1dashu/quiet-md.";
 const COMMANDS: &[(&[&str], &str)] = &[
     (&["ls"], "quiet ls [FOLDER] [-r] [--kind doc|md|board|table|folder]
 
-Lists a folder; with none, 主页: the folders Quiet.md has open, where each
+Lists a folder; with none, the top-level folders: those Quiet.md has open, where each
 is on disk and whether it opens (two of one name: use its key, which --json
 shows, as the first part of a path). -r goes into subfolders. Each line:
 path, [kind], last modified.
@@ -100,10 +106,12 @@ that mention DOC."),
 
 The whole library: files that do not parse, mentions of documents that are
 gone, empty documents, pictures and files no document uses."),
-    (&["new"], "quiet new TITLE [--in FOLDER] [--md TEXT|-] [--kind doc|md|board|table] [--fields A,B,… | --csv TEXT|-]
+    (&["new"], "quiet new TITLE [--in FOLDER] [--md TEXT|-] [--kind doc|md|board|table] [--fields A,B,… | --csv TEXT|-] [--open]
+
+--open shows it in Quiet.md once written, as 新建 there does (`quiet open`).
 
 A new document (DocxXML; --kind md or --markdown for a .md file), its body
-from Markdown; an empty board; or a 数据表 with the columns --fields names,
+from Markdown; an empty board; or a 数据库 with the columns --fields names,
 or from CSV text whose first row names them (types guessed from the values).
 
   quiet new 会议纪要 --in 会议 --md '# 议题\\n- [ ] 预算'
@@ -138,7 +146,7 @@ Changes one block in place: its text (inline Markdown), a todo's state, its kind
 The file follows the title. Mentions in other documents keep working."),
     (&["mv"], "quiet mv DOC FOLDER
 
-Into FOLDER, a path from 主页 within the document's own top folder (its name
+Into FOLDER, a full path within the document's own top folder (its name
 alone: its top). Links to it in other documents are rewritten; moving to
 another top folder is not supported yet."),
     (&["rm"], "quiet rm DOC
@@ -165,7 +173,7 @@ quiet table view rename DOC NAME NEW  |  quiet table view delete DOC NAME
 quiet table new DOC NAME [--fields A,B | --csv FILE|-]   another table in the file
 quiet table rename DOC NAME NEW  |  quiet table remove DOC NAME [--force]
 
-A 数据表 file, or the 数据表 block REF in a document; --table picks one of
+A 数据库 file, or the 数据库 block REF in a document; --table picks one of
 its tables (the first by default). Rows have ids that last (r12).
 
 Reading: every row in the table's order, or with --view a view's 筛选, 排序,
@@ -243,7 +251,7 @@ Brings the document called NAME (or with that id) back from the trash, to where 
     (&["import"], "quiet import FILE… [--in FOLDER]
 
 Copies files into the library: Markdown (.md, .txt; pictures beside it are
-copied in), DocxXML (.xml), CSV/TSV (as a 数据表), .excalidraw (as a 画板).
+copied in), DocxXML (.xml), CSV/TSV (as a 数据库), .excalidraw (as a 画板).
 The originals are left alone."),
     (&["run"], "quiet run [FILE|-] [-e CODE] [--timeout SECS] [--dry-run]
 
@@ -255,14 +263,16 @@ is written. Top-level await and return work; a returned value is printed.
     (&["call"], "quiet call OP [JSON|-]
 
 Any operation by its name with JSON arguments, as `lib.call` in a script.
-Operations: ls find open outline read blocks links check history trash_list
+Operations: ls find load outline read blocks links check history trash_list
 (reading); insert replace remove move set create mkdir rename mv trash
 restore untrash import table table_add table_update table_delete
 table_import table_field_add table_field_change table_field_delete
 table_views table_view_add table_view_set table_view_rename
 table_view_delete table_new table_rename table_remove board board_add
 board_remove. Arguments are the commands' options by name, the
-document as \"doc\" and a block as \"at\".
+document as \"doc\" and a block as \"at\". `load` is what lib.doc does:
+a document's path, title and rev loaded into the script (not shown in the
+app; that is `quiet open`).
 
   quiet call blocks '{\"doc\": \"周报\", \"kind\": \"todo\", \"done\": false}'"),
     (&["mcp"], "quiet mcp [--library DIR]
@@ -270,6 +280,46 @@ document as \"doc\" and a block as \"at\".
 An MCP server on stdin/stdout with two tools: `quiet` (a command line) and
 `quiet_run` (a script). For agents that speak MCP but have no shell. E.g. in
 an MCP client's settings: {\"command\": \"quiet\", \"args\": [\"mcp\"]}"),
+    (&["folders"], "quiet folders [ls] | quiet folders add PATH [--force] | quiet folders remove NAME|PATH|KEY
+
+The top-level folders Quiet.md's sidebar lists on this computer (主页), as
+添加文件夹 / 从侧栏移除 in the app keep them: each line is name, path on disk,
+key, and `default` for the one new things go to. `add` opens a folder where it
+is (nothing is copied; a hidden .quiet folder is made in it); it must exist,
+not be open already, not be inside one that is open, not hold one, and not be
+a disk's top, the home folder or a system folder. A code project or a folder
+with a great many files asks first, as the app does: --force adds it anyway.
+`remove` takes it off the sidebar; its files stay as they are. A running
+Quiet.md shows the change within a few seconds. --dry-run checks, writes nothing.
+
+  quiet folders add ~/Documents/Notes
+  quiet folders remove Notes"),
+    (&["open"], "quiet open DOC[#REF] [--dry-run] | quiet open --folder FOLDER | quiet open --trash
+
+Shows the document in Quiet.md, scrolled to the block REF names and with that
+block selected (REF as `quiet read` takes it: #3~k7f2, #2.1 or a heading's
+text), a folder's page (a top-level folder's name opens its own), or the
+trash (after `quiet rm`, say). `quiet new … --open` opens what it made. Quiet.md
+is launched if it isn't running. It goes through a quietmd:// link, which only
+navigates: it prints the link; --dry-run prints it without opening it. The
+link goes to the installed Quiet.md (a development preview does not take them). With
+--library DIR, that folder must be open in Quiet.md (`quiet folders add`).
+
+  quiet open 工作/周报#风险
+  quiet open --folder 工作/项目"),
+    (&["duplicate", "cp"], "quiet duplicate DOC [TITLE]
+
+创建副本: a copy of the document (a 画板, a 数据库, a folder's 正文 too) beside
+it, titled TITLE or \"<title> 副本\" as the app names it. Links inside the
+copy still point where they pointed.
+
+  quiet duplicate 工作/周报 \"周报 模板\""),
+    (&["pin", "unpin"], "quiet pin DOC | quiet unpin DOC
+
+添加到「置顶」/ 从「置顶」移除: the document shows in the sidebar's 置顶
+list (`ls --json` says `pinned`). The file itself is not touched.
+
+  quiet pin 工作/周报"),
     (&["telemetry"], "quiet telemetry [on|off|status]
 
 quiet counts how often its commands run: per day, how many ran and failed and
@@ -281,10 +331,22 @@ id. Nothing is counted while DO_NOT_TRACK or QUIET_NO_TELEMETRY is set, in CI,
 or while Settings › General › Anonymous usage statistics (设置 › 通用 › 匿名使用统计)
 is off in Quiet.md (untouched, it follows Check for updates automatically)."),
     (&["guide", "skill"], "quiet guide
+quiet guide import [--in FOLDER] [--lang zh|en]
 
 The full guide for agents: addressing, every command, the script API,
 examples. It matches this quiet; the agent skill (npx skills add
-s1dashu/quiet-md) carries the same guide as its reference."),
+s1dashu/quiet-md) carries the same guide as its reference.
+
+`guide import` is Settings › About › Import the latest guide (设置 › 关于 ›
+导入最新的开始指南): the Getting started guide (开始指南) that comes with this
+version, as a new folder at the top of a top-level folder: \"Quiet.md Guide\",
+or \"Quiet.md 指南\" in Chinese, numbered when the name is taken. Nothing there
+is overwritten; pictures the library already has under another file of the
+same name go to .assets/guides-2/ (and so on). --in picks the top-level folder
+(default: the one Quiet.md first put the guide in, else the first); --lang
+the guide's language (default: Quiet.md's, Chinese for 简体中文, else English).
+
+  quiet guide import --in Quiet.md --lang en"),
 ];
 
 pub fn of(cmd: Option<&str>) -> R<String> {
