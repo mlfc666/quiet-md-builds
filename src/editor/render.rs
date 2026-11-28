@@ -68,6 +68,9 @@ pub(super) enum Reveal {
     Find(Pos),
     /// A block, put 24px below the top.
     Block(BlockId),
+    /// The caret's line back at this many px below the page's top (a zoom
+    /// keeps the line being read where it was).
+    At(f32),
 }
 
 /// `box-shadow: 0 0 0 1px` around a radius-8 bordered box. (A GPUI shadow
@@ -107,7 +110,7 @@ fn hash_block(b: &Block, orders: &rustc_hash::FxHashMap<BlockId, String>, h: &mu
     b.folded.hash(h);
     match &b.kind {
         BlockKind::Heading { level, .. } => (level, orders.get(&b.id)).hash(h),
-        BlockKind::Code { wrap, show_code, .. } => (wrap, show_code).hash(h),
+        BlockKind::Code { wrap, .. } => wrap.hash(h),
         BlockKind::Image { src, width, height, caption, crop, .. } => {
             (src, width.map(f32::to_bits), height.map(f32::to_bits), caption.as_ref().map(String::len), crop.map(|c| c.map(f32::to_bits))).hash(h)
         }
@@ -158,6 +161,9 @@ pub(super) struct Env {
 const TEXT_PLACEHOLDER: &str = "输入“/”快速插入内容";
 /// 打字机模式 holds the caret's line this far down the page (0.5: the middle).
 pub(super) const TYPEWRITER_LINE: f32 = 0.5;
+/// 段落聚焦: the other paragraphs' opacity, and how long a change of paragraph eases (s).
+const FOCUS_DIM: f32 = 0.3;
+const FOCUS_FADE: f32 = 0.15;
 
 pub(super) fn margins(b: &Block, env: Env) -> (f32, f32) {
     if env.cell {
@@ -841,11 +847,6 @@ impl R<'_> {
         // right-aligned), revealed on hover / while editing.
         let editing = self.focused && self.ed.core.sel.head.block == id;
         let folded = b.folded;
-        let show_code = matches!(b.kind, BlockKind::Code { show_code: true, .. });
-        let mermaid = !folded && lang == crate::mermaid::LANG && crate::mermaid::SUPPORTED;
-        // A Mermaid block shows its diagram, under the code while the caret is in it.
-        let reveal = editing && !self.ed.read_only;
-        let diagram = if mermaid && !show_code { self.diagram(b, reveal, 36., 16., cx) } else { None };
         // Handle hovered / its menu open (`.hovered`): light blue ring
         // over a clear body so the block tint shows; block-selected: blue
         // border on the gray body.
@@ -1032,18 +1033,6 @@ impl R<'_> {
                                         ),
                                 )
                             })
-                            .when(mermaid, |d| {
-                                d.child(
-                                    header_btn("code-view")
-                                        .child(icon(if show_code { "view-preview" } else { "code" }, 14., Theme::icon()))
-                                        .child(if show_code { crate::settings::tr("显示图表", "Show diagram") } else { crate::settings::tr("隐藏图表", "Hide diagram") })
-                                        .child(sep(-3.))
-                                        .on_mouse_down(MouseButton::Left, cx.listener(move |e, _, window, cx| {
-                                            cx.stop_propagation();
-                                            e.toggle_diagram(id, window, cx);
-                                        })),
-                                )
-                            })
                             .child(
                                 header_btn("code-copy")
                                     .child(icon("copy", 14., Theme::icon()))
@@ -1060,7 +1049,7 @@ impl R<'_> {
             )
             .child(fold_btn)
             .when(folded, |d| d.child(div().h(px(36.))))
-            .when(!folded && (diagram.is_none() || reveal), |d| {
+            .when(!folded, |d| {
                 d.child(
                     div()
                         .pt(px(36.))
@@ -1092,91 +1081,12 @@ impl R<'_> {
                         .child(self.code_column(id, wrap, el, 12.)),
                 )
             })
-            .children(diagram)
             .into_any_element()
     }
 }
 
 /// Code blocks: SF Mono 13 / 20, a 36pt line-number gutter.
 const GUTTER_W: f32 = 36.;
-
-impl R<'_> {
-    /// A Mermaid block's diagram (mermaid.rs) with its state: below the code
-    /// (`below`) while the caret is in the block, else in its place (`top`
-    /// clears the toolbar), where a click puts the caret in the code.
-    fn diagram(&self, b: &Block, below: bool, top: f32, side: f32, cx: &mut Context<Editor>) -> Option<AnyElement> {
-        if b.text.text.trim().is_empty() { return None; }
-        let id = b.id;
-        let (shown, note) = match crate::mermaid::look(id.0, &b.text.text, cx) {
-            crate::mermaid::Look::Ready(d) => (Some(d), None),
-            crate::mermaid::Look::Pending(d) => {
-                let note = d.is_none().then(|| crate::settings::tr("正在绘制图表…", "Drawing the diagram…").to_string());
-                (d, note)
-            }
-            crate::mermaid::Look::Failed(m, d) => {
-                let m: Vec<&str> = m.lines().take(6).collect();
-                (d, Some(format!("{}{}", crate::settings::tr("图表有误：", "Diagram error: "), m.join("\n"))))
-            }
-        };
-        let pic = shown.map(|d| {
-            // Shrunk to the text column (inside columns or cells it may still clip).
-            let avail = (self.ed.content_width() - 2. * side - 2.).max(40.);
-            let k = (avail / d.size.0).min(1.);
-            div().w(px(d.size.0 * k)).h(px(d.size.1 * k)).max_w_full().child(img(d.image).size_full().object_fit(ObjectFit::Contain))
-        });
-        Some(
-            div()
-                .id(("code-diagram", id.0))
-                .when(below, |d| d.mt(px(-4.)).pt(px(12.)).border_t_1().border_color(Theme::line_divider()))
-                .when(!below, |d| d.pt(px(top)))
-                .pb(px(12.))
-                .px(px(side))
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(8.))
-                .children(pic)
-                .children(note.map(|n| {
-                    div().w_full().font_family(theme::MONO_FONT).text_size(px(12.)).line_height(px(18.)).text_color(Theme::text_caption()).child(n)
-                }))
-                .when(!below && !self.ed.read_only, |d| {
-                    d.cursor_text().on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |e, _, window, cx| {
-                            cx.stop_propagation();
-                            e.core.clear_block_sel();
-                            e.menu = None;
-                            e.core.caret_to_end_of(id);
-                            window.focus(&e.focus, cx);
-                            cx.notify();
-                        }),
-                    )
-                })
-                .into_any_element(),
-        )
-    }
-}
-
-impl Editor {
-    /// 隐藏图表 / 显示图表 on a Mermaid block: a saved property, like 自动换行.
-    fn toggle_diagram(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
-        self.core.checkpoint(core::EditKind::Other);
-        if let Some(b) = self.core.block_mut(id)
-            && let BlockKind::Code { show_code, .. } = &mut b.kind
-        {
-            *show_code = !*show_code;
-        }
-        self.changed_preserving_viewport(window, cx);
-    }
-
-    /// The row of a Mermaid block the caret is in shows its code too.
-    fn diagram_nonce(&self, focused: bool) -> Option<(BlockId, u64)> {
-        let id = self.core.sel.head.block;
-        let on = crate::mermaid::SUPPORTED && focused && !self.read_only
-            && matches!(self.core.kind_of(id), Some(BlockKind::Code { lang, show_code: false, .. }) if lang == crate::mermaid::LANG);
-        on.then(|| (id, 0x6d65_726d_u64.wrapping_mul(id.0 | 1)))
-    }
-}
 
 pub(super) const TOP: Env = Env { depth: 0, cell: false, color: None, in_callout: false, root: true, column: false, quote: false, width: 0. };
 
@@ -1188,7 +1098,7 @@ impl Editor {
         let mut items = vec![Item::Header];
         let mut h = FxHasher::default();
         // Every row re-measures when the text column changes width.
-        let seed = (self.layout.ml.to_bits(), self.layout.mr.to_bits(), self.column_max().map(f32::to_bits), self.img.generation, crate::themes::generation(), &self.sub_pages, self.links.generation, crate::mermaid::generation());
+        let seed = (self.layout.ml.to_bits(), self.layout.mr.to_bits(), self.column_max().map(f32::to_bits), self.img.generation, crate::themes::generation(), &self.sub_pages, self.links.generation);
         seed.hash(&mut h);
         let seed = h.finish();
         self.core.doc.title.text.len().hash(&mut h);
@@ -1200,7 +1110,7 @@ impl Editor {
         let links = self.links_key() ^ (self.below_h.to_bits() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
         // Rows whose look depends on editor state, not the document.
         let mut nonces = self.grid_overrides();
-        nonces.extend(self.image_nonces(focused).into_iter().chain(self.button_nonce()).chain(self.diagram_nonce(focused)));
+        nonces.extend(self.image_nonces(focused).into_iter().chain(self.button_nonce()));
         // Walking a long document costs ~1.5ms (1M chars): skip it when
         // nothing the rows depend on changed, as on every scrolling frame.
         let mut fh = FxHasher::default();
@@ -1412,7 +1322,8 @@ impl Editor {
         };
         let targets = r.targets.into_inner();
         self.handle_targets.extend(targets);
-        let padded = div().w_full().pl(px(self.layout.ml)).pr(px(self.layout.mr)).child(content);
+        let a = self.item_opacity(ix);
+        let padded = div().w_full().pl(px(self.layout.ml)).pr(px(self.layout.mr)).when(a < 1., |d| d.opacity(a)).child(content);
         match cover {
             // The cover spans the whole pane, above the padded header.
             Some(c) => div().w_full().child(c).child(padded).into_any_element(),
@@ -1427,14 +1338,84 @@ impl Editor {
             && self.core.block_sel.is_none() && self.core.sel.is_collapsed()
     }
 
+    /// 放大 / 缩小 is about to change the text size: the line being read stays
+    /// where it is. A caret on the page keeps its height (in 打字机模式 the
+    /// middle); otherwise the row at the top keeps its share scrolled past.
+    pub fn hold_position(&mut self, ratio: f32) {
+        let view = self.list.viewport_bounds();
+        let h = self.core.sel.head;
+        let at = self.cache.borrow().get(&h.block).map(|l| l.position_for(h.offset).y);
+        match at.filter(|y| *y >= view.top() && *y < view.bottom()) {
+            Some(y) if self.core.block_sel.is_none() => {
+                let tw = self.typewriter_on();
+                self.reveal = Some((if tw { Reveal::Caret } else { Reveal::At(f32::from(y - view.top())) }, 0));
+                // 打字机模式: back on the middle in one go, not a glide.
+                self.tw_snap = tw;
+            }
+            _ => {
+                let top = self.list.logical_scroll_top();
+                self.list.scroll_to(ListOffset { item_ix: top.item_ix, offset_in_item: top.offset_in_item * ratio });
+            }
+        }
+    }
+
+    /// 放大 / 缩小's percentage in the note's corner.
+    pub fn show_zoom_badge(&mut self, pct: u32, cx: &mut Context<Self>) {
+        self.zoom_badge = Some((pct, web_time::Instant::now()));
+        cx.notify();
+    }
+
     /// For scripts (`caret`): the caret line's middle and the page's height,
-    /// both from the page's top, as last drawn.
+    /// both from the page's top, and the page's top in the window, as last drawn.
     #[cfg(feature = "devtools")]
-    pub fn caret_probe(&self) -> Option<(f32, f32)> {
+    pub fn caret_probe(&self) -> Option<(f32, f32, f32)> {
         let h = self.core.sel.head;
         let view = self.list.viewport_bounds();
         let y = self.cache.borrow().get(&h.block).map(|l| l.position_for(h.offset).y + l.line_height / 2.)?;
-        Some((f32::from(y - view.top()), f32::from(view.size.height)))
+        Some((f32::from(y - view.top()), f32::from(view.size.height), f32::from(view.top())))
+    }
+
+    /// 段落聚焦: the rows that stay clear, first to last (the title is row 0):
+    /// the caret's, or every one the selection spans. `None` dims nothing.
+    fn lit_rows(&self) -> Option<(usize, usize)> {
+        if !crate::settings::paragraph_focus() || self.read_only { return None }
+        let (a, b) = match self.core.block_sel {
+            Some(s) => (s.anchor, s.head),
+            None => (self.core.sel.anchor.block, self.core.sel.head.block),
+        };
+        let (a, b) = (self.item_of(a)?, self.item_of(b)?);
+        Some((a.min(b), a.max(b)))
+    }
+
+    /// 段落聚焦's opacity for row `ix`, easing over `FOCUS_FADE` from the rows
+    /// lit before (丰富 motion; 克制 switches at once).
+    fn item_opacity(&self, ix: usize) -> f32 {
+        let Some(now) = self.lit else { return 1. };
+        let at = |r: (usize, usize)| if (r.0..=r.1).contains(&ix) { 1. } else { FOCUS_DIM };
+        match self.lit_fade {
+            Some((before, t0)) => {
+                let k = (t0.elapsed().as_secs_f32() / FOCUS_FADE).min(1.);
+                let (from, to) = (at(before), at(now));
+                from + (to - from) * (1. - (1. - k).powi(3))
+            }
+            None => at(now),
+        }
+    }
+
+    /// Follows the selection to the rows 段落聚焦 keeps clear (before the list
+    /// draws). Turning it on or off eases too: off is every row lit.
+    fn sync_lit(&mut self, window: &mut Window) {
+        const ALL: (usize, usize) = (0, usize::MAX);
+        let (to, from) = (self.lit_rows().unwrap_or(ALL), self.lit.unwrap_or(ALL));
+        if to != from {
+            self.lit_fade = crate::settings::motion_high().then(|| (from, web_time::Instant::now()));
+            self.lit = Some(to);
+        }
+        if let Some((_, t0)) = self.lit_fade {
+            if t0.elapsed().as_secs_f32() < FOCUS_FADE { window.request_animation_frame(); return }
+            self.lit_fade = None;
+        }
+        if self.lit == Some(ALL) { self.lit = None }
     }
 
     /// The space below the last block: 200px, or with 打字机模式 half the page,
@@ -1462,7 +1443,7 @@ impl Editor {
             })
         };
         let (block, target) = match req {
-            Reveal::Caret => match self.core.block_sel {
+            Reveal::Caret | Reveal::At(_) => match self.core.block_sel {
                 Some(b) => (b.head, self.block_bounds.borrow().get(&b.head).copied()),
                 // A selected image has no text layout: keep its box in view.
                 None => {
@@ -1479,6 +1460,8 @@ impl Editor {
             {
                 self.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
                 self.reveal = Some((req, tries + 1));
+                // A caret off the page lands in the middle in one go, not a glide from the top.
+                self.tw_snap = true;
                 // `refresh` is a no-op while drawing.
                 window.request_animation_frame();
             }
@@ -1498,7 +1481,10 @@ impl Editor {
                 (t.bottom() - (view.bottom() - margin)).min(t.top() - view.top() - margin)
             }
             Reveal::Caret => px(0.),
+            Reveal::At(y) => t.top() - (view.top() + px(y)),
             // The find box covers the top right of the page.
+            // 打字机模式 brings a find hit to the middle too, where the caret will write.
+            Reveal::Find(_) if crate::settings::typewriter() && !self.read_only => t.center().y - (view.top() + view.size.height * TYPEWRITER_LINE),
             Reveal::Find(_) if t.top() >= view.top() + px(250.) && t.bottom() <= view.bottom() - margin => px(0.),
             Reveal::Find(_) => t.top() - (view.top() + view.size.height / 2.),
             Reveal::Block(_) => t.top() - view.top() - px(24.),
@@ -1508,12 +1494,17 @@ impl Editor {
         // further. (Some frames draw before a step lands: one still frame is no stop.)
         let still = self.glide.map_or(0, |(_, before, n)| if (at - before).abs() < px(0.25) { n + 1 } else { 0 });
         let held = tw && still >= 3;
+        // The caret's line is (or is on its way to) the middle: a resize keeps it there.
+        if matches!(req, Reveal::Caret) { self.tw_centred = tw; }
+        // A window resize, the sidebar or 专注模式 reflowed the page: no glide.
+        let snap = std::mem::take(&mut self.tw_snap);
         if d == px(0.) || held {
             self.glide = None;
         } else {
             // 丰富 glides there (the rest of the way shrinks by e^(−t/60ms),
-            // re-aimed each frame as the text moves); 克制 jumps.
-            let step = match tw && crate::settings::motion_high() {
+            // re-aimed each frame as the text moves); 克制 jumps, and so does a
+            // jump of more than a page (a big paste, undo far away).
+            let step = match tw && crate::settings::motion_high() && !snap && d.abs() <= view.size.height {
                 true => {
                     let dt = self.glide.map_or(1. / 60., |(t, _, _)| t.elapsed().as_secs_f32().min(0.05));
                     let s = d * (1. - (-dt / 0.06).exp());
@@ -1550,13 +1541,19 @@ impl Editor {
         let lightbox = self.lightbox_el(window, cx);
         let board = self.board_el();
         self.sync_tables(window, cx);
-        let toast = self.toast_el(window);
         let probes = std::mem::take(&mut *self.probes.borrow_mut());
         let origin0 = self.content_origin.get();
-        let counter = self.word_counter();
+        let zoom_badge = self.zoom_badge_el(window);
         let find_box = self.find_box(window, cx);
         if std::mem::take(&mut self.autoscroll) && self.reveal.is_none() {
             self.reveal = Some((Reveal::Caret, 0));
+        }
+        // 打字机模式: a page resized (the window, the sidebar, 专注模式) under a
+        // centred caret keeps its line in the middle, at once.
+        let size = window.viewport_size();
+        if self.tw_size.replace(size).is_some_and(|was| was != size) && self.tw_centred && self.typewriter_on() && self.reveal.is_none() {
+            self.reveal = Some((Reveal::Caret, 0));
+            self.tw_snap = true;
         }
         // The handle floats above everything (deferred), so the page viewport
         // doesn't clip it: hide it once its block's top scrolls out of view.
@@ -1594,6 +1591,7 @@ impl Editor {
         let focused = self.focus.is_focused(window);
         self.below_h = self.below_height();
         self.sync_items(focused, super::cover::cover_height(window));
+        self.sync_lit(window);
         let generation = self.core.generation;
         let (units, eqnos) = match self.frame.generation == Some(generation) {
             true => (self.frame.units.clone(), self.frame.eqnos.clone()),
@@ -1850,11 +1848,10 @@ impl Editor {
             .children(table_overlay)
             .children(block_overlay)
             .children(image_layer)
-            .children(counter)
+            .children(zoom_badge)
             .children(find_box)
             .children(lightbox)
             .children(board)
-            .children(toast)
             .child(root_canvas)
     }
 }
@@ -1889,50 +1886,20 @@ impl Editor {
         })
     }
 
-    /// "N 字" chip at the bottom right while text is selected (§2).
-    fn word_counter(&self) -> Option<AnyElement> {
-        let n = if let Some(sel) = self.core.block_sel {
-            // Walking a long document for the selected blocks costs ~10ms
-            // (1M chars): once per selection and edit, not every frame.
-            let key = (self.core.generation, sel);
-            match self.sel_words.get() {
-                Some((k, n)) if k == key => n,
-                _ => {
-                    let n = self.core.block_sel_ids().iter().filter_map(|id| self.core.block(*id)).map(|b| crate::docinfo::blocks_word_count(std::slice::from_ref(b))).sum();
-                    self.sel_words.set(Some((key, n)));
-                    n
-                }
-            }
-        } else if self.core.sel.is_collapsed() {
-            return None;
-        } else {
-            crate::docinfo::word_count(&self.core.selected_text())
-        };
-        // Selection word count at the note's bottom right: an outline xs
-        // button's face (1px `border`, shadow-xs, radius 8, text-xs), not a
-        // button; opaque (`background`) as it floats over the text.
-        Some(
-            div()
-                .absolute()
-                .bottom(px(10.))
-                .right(px(34.))
-                .h(px(24.))
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .rounded(px(8.))
-                .bg(crate::design::color::background())
-                .border_1()
-                .border_color(crate::design::color::border())
-                .shadow(crate::design::shadow::xs())
-                .font_family(crate::theme::ui_family())
-                .text_size(px(12.))
-                .text_color(crate::design::color::muted_foreground())
-                .child(crate::settings::localized(crate::settings::lang(), "{n} 字", || format!("{n} 字"), || format!("{n} {}", if n == 1 { "word" } else { "words" })))
-                .into_any_element(),
-        )
+    /// 放大 / 缩小's percentage at the note's bottom right (shadcn's `Badge`), a
+    /// second, then it fades.
+    fn zoom_badge_el(&self, window: &mut Window) -> Option<AnyElement> {
+        let (pct, t0) = self.zoom_badge.as_ref()?;
+        let e = t0.elapsed().as_secs_f32();
+        if e >= ZOOM_BADGE + 0.2 { return None }
+        window.request_animation_frame();
+        let a = if e > ZOOM_BADGE { (ZOOM_BADGE + 0.2 - e) / 0.2 } else { 1. };
+        Some(div().absolute().bottom(px(12.)).right(px(34.)).opacity(a).child(crate::design::Badge::new(format!("{pct}%"))).into_any_element())
     }
 }
+
+/// How long 放大 / 缩小's percentage stays before it fades (s).
+const ZOOM_BADGE: f32 = 1.;
 
 impl R<'_> {
 fn spec_for_feishu(&self, b: &Block, env: Env) -> TextSpec {
@@ -2330,11 +2297,6 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
         // right-aligned), revealed on hover / while editing.
         let editing = self.focused && self.ed.core.sel.head.block == id;
         let folded = b.folded;
-        let show_code = matches!(b.kind, BlockKind::Code { show_code: true, .. });
-        let mermaid = !folded && lang == crate::mermaid::LANG && crate::mermaid::SUPPORTED;
-        // A Mermaid block shows its diagram, under the code while the caret is in it.
-        let reveal = editing && !self.ed.read_only;
-        let diagram = if mermaid && !show_code { self.diagram(b, reveal, 40., 20., cx) } else { None };
         // Handle hovered / its menu open (`.hovered`): light blue ring
         // over a clear body so the block tint shows; block-selected: blue
         // border on the gray body.
@@ -2505,18 +2467,6 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
                                         ),
                                 )
                             })
-                            .when(mermaid, |d| {
-                                d.child(
-                                    header_btn("code-view")
-                                        .child(icon(if show_code { "view-preview" } else { "code" }, 16., Theme::icon()))
-                                        .child(if show_code { crate::settings::tr("显示图表", "Show diagram") } else { crate::settings::tr("隐藏图表", "Hide diagram") })
-                                        .child(sep(-9.))
-                                        .on_mouse_down(MouseButton::Left, cx.listener(move |e, _, window, cx| {
-                                            cx.stop_propagation();
-                                            e.toggle_diagram(id, window, cx);
-                                        })),
-                                )
-                            })
                             .child(
                                 header_btn("code-copy")
                                     .child(icon("copy", 16., Theme::icon()))
@@ -2533,7 +2483,7 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
             )
             .child(fold_btn)
             .when(folded, |d| d.child(div().h(px(38.))))
-            .when(!folded && (diagram.is_none() || reveal), |d| {
+            .when(!folded, |d| {
                 d.child(
                     div()
                         .pt(px(40.))
@@ -2563,7 +2513,6 @@ fn code_block_feishu(&self, b: &Block, lang: &str, wrap: bool, cx: &mut Context<
                         .child(self.code_column(id, wrap, el, 14.)),
                 )
             })
-            .children(diagram)
             .into_any_element()
     }
 }

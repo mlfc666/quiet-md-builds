@@ -1511,7 +1511,7 @@ dependencies = [
 
 [[package]]
 name = "fdl_core"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1532,6 +1532,7 @@ dependencies = [
  "unicode-width",
  "uuid",
  "web-time",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2103,6 +2104,7 @@ dependencies = [
  "wayland-protocols-wlr",
  "x11rb",
  "xkbcommon",
+ "yeslogic-fontconfig-sys",
  "zed-scap",
  "zed-xim",
 ]
@@ -4297,12 +4299,13 @@ dependencies = [
 
 [[package]]
 name = "quiet_cli"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",
  "fdl_core",
  "rquickjs",
+ "serde",
  "serde_json",
  "sha1_smol",
  "uuid",
@@ -4310,7 +4313,7 @@ dependencies = [
 
 [[package]]
 name = "quiet_md"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-lock",
@@ -4322,6 +4325,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_apple",
+ "gpui_linux",
  "gpui_platform",
  "gpui_web",
  "gpui_wgpu",
@@ -5872,9 +5876,9 @@ checksum = "b1d386ff53b415b7fe27b50bb44679e2cc4660272694b7b6f3326d8480823a94"
 
 [[package]]
 name = "unicode-width"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
 name = "url"
@@ -7060,8 +7064,6 @@ checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 [[package]]
 name = "xim-ctext"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ac61a7062c40f3c37b6e82eeeef835d5cc7824b632a72784a89b3963c33284c"
 dependencies = [
  "encoding_rs",
 ]

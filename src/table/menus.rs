@@ -188,7 +188,7 @@ pub(crate) fn popup(v: &TableView, base: &Base, t: &Table, view: &View, _window:
 /// The list on top of a popup (a form's select boxes).
 pub(crate) fn dropdown(v: &TableView, cx: &Context<TableView>) -> Option<AnyElement> {
     let d = v.dropdown.as_ref()?;
-    let mut list = crate::design::Popover::new("tb-dropdown").occlude().w(px(d.width)).fit(320.).py(px(4.))
+    let mut list = crate::design::Popover::new("tb-dropdown").occlude().w(px(d.width)).fit(crate::design::room(d.pos, d.corner).min(320.)).py(px(4.))
         .on_mouse_down_out(cx.listener(|v, _, _, cx| { v.dropdown = None; cx.notify(); }));
     for (i, it) in d.items.iter().enumerate() {
         let pick = d.pick.clone();
@@ -198,7 +198,7 @@ pub(crate) fn dropdown(v: &TableView, cx: &Context<TableView>) -> Option<AnyElem
             .when(it.on, |d| d.child(icon("check", 14., crate::design::color::foreground())))
             .on_click(cx.listener(move |v, _, window, cx| { v.dropdown = None; pick(v, i, window, cx); cx.notify(); })));
     }
-    Some(deferred(anchored().position(d.pos).snap_to_window_with_margin(px(8.)).child(list)).with_priority(6).into_any_element())
+    Some(deferred(anchored().anchor(d.corner).position(d.pos).snap_to_window_with_margin(px(8.)).child(list)).with_priority(6).into_any_element())
 }
 
 /// 飞书's column menu.
@@ -216,11 +216,11 @@ fn field_menu(v: &TableView, t: &Table, view: &View, fid: FieldId, pos: Point<Pi
     let insert = move |v: &mut TableView, after: bool, window: &mut Window, cx: &mut Context<TableView>| {
         v.popup = None;
         let form = fields::FieldForm::add(v, Some(at + after as usize), window, cx).beside(fid, after);
-        v.open_popup(pos, Popup::FieldForm(form), cx);
+        v.swap_popup(pos, Popup::FieldForm(form), cx);
     };
     let sort = move |v: &mut TableView, desc: bool, window: &mut Window, cx: &mut Context<TableView>| { v.edit_view(cx, |view| view.opts.sorts = vec![SortBy { field: fid, desc }]); close(v, window, cx); };
     shell("tb-field-menu", crate::design::menu_w::SM, v.popup_room(), cx)
-        .child(menu_item("tb-fm-edit", "pen-line", label("修改字段/列"), false).on_click(cx.listener(move |v, _, window, cx| { v.popup = None; edit_field(v, fid, pos, window, cx); })))
+        .child(menu_item("tb-fm-edit", "pen-line", label("修改字段/列"), false).on_click(cx.listener(move |v, _, window, cx| { v.commit_edit(true, window, cx); let Some(form) = fields::FieldForm::edit(v, fid, window, cx) else { return }; v.swap_popup(pos, Popup::FieldForm(form), cx); })))
         .child(menu_item("tb-fm-dup", "copy", label("复制字段/列"), false).on_click(cx.listener(move |v, _, window, cx| { v.edit(cx, |d| d.duplicate_field(tid, fid)); close(v, window, cx); })))
         .child(menu_rule())
         .when(!primary, |d| d.child(menu_item("tb-fm-left", "indent-decrease", label("向左插入字段/列"), false).on_click(cx.listener(move |v, _, window, cx| insert(v, false, window, cx)))))
@@ -239,8 +239,11 @@ fn field_menu(v: &TableView, t: &Table, view: &View, fid: FieldId, pos: Point<Pi
             panels::open(v, panels::Kind::Filter, pos, window, cx);
         })))
         .child(menu_item("tb-fm-group", "view-list", label("按此字段分组"), false).on_click(cx.listener(move |v, _, window, cx| { v.edit_view(cx, |view| view.opts.groups = vec![SortBy { field: fid, desc: false }]); close(v, window, cx); })))
-        // with several columns selected (this one among them) hide and delete act on all of them but the title
-        .when(!picked.is_empty(), |d| { let (n, hide, del) = (picked.len(), picked.clone(), picked.clone()); d.child(menu_rule())
+        // with several columns selected (this one among them) hide and delete act on all of them but the title;
+        // the title alone: delete shows, dimmed, saying why
+        .child(menu_rule())
+        .when(picked.is_empty(), |d| d.child(menu_item("tb-fm-del", "bin", label("删除字段/列"), true).disabled(true).description(label("主字段作为记录标题保留"))))
+        .when(!picked.is_empty(), |d| { let (n, hide, del) = (picked.len(), picked.clone(), picked.clone()); d
             .child(menu_item("tb-fm-hide", "eye", if n > 1 { crate::localized_format!("隐藏 {n} 个字段", "Hide {n} fields") } else { label("隐藏字段/列") }, false)
                 .on_click(cx.listener(move |v, _, window, cx| { let ids = hide.clone(); v.edit_view(cx, |view| view.opts.hidden.extend(ids)); v.col_sel.clear(); close(v, window, cx); })))
             .child(menu_item("tb-fm-del", "bin", if n > 1 { crate::localized_format!("删除 {n} 个字段", "Delete {n} fields") } else { label("删除字段/列") }, true)
@@ -255,7 +258,12 @@ fn cell_menu(v: &TableView, t: &Table, view: &View, rec: RecId, cx: &Context<Tab
     let manual = view.opts.sorts.is_empty() && view.opts.groups.is_empty();
     let insert = move |v: &mut TableView, below: bool, window: &mut Window, cx: &mut Context<TableView>| {
         let (with, first) = { let st = v.state.read(cx); let t = st.doc.base.table(tid); (t.zip(t.and_then(|t| t.view(v.view))).map(|(t, view)| query::defaults_for(t, view, None)).unwrap_or_default(), t.and_then(|t| t.view(v.view).and_then(|view| t.visible_fields(view).first().map(|f| f.id)))) };
-        let ids = v.edit(cx, |d| { let at = d.base.table(tid).and_then(|t| t.index_of(rec)).map(|i| i + below as usize); d.add_records(tid, at, 1, &with) });
+        // with a range (or rows ticked) the new row goes above the first of them or below the last, not beside the one clicked
+        let rows = target_rows(v, Some(rec), cx);
+        let ids = v.edit(cx, |d| {
+            let at = d.base.table(tid).and_then(|t| { let at = rows.iter().filter_map(|r| t.index_of(*r)); if below { at.max() } else { at.min() } }).map(|i| i + below as usize);
+            d.add_records(tid, at, 1, &with)
+        });
         if let (Some(id), Some(f)) = (ids.first(), first) { v.sel = Some(Sel { anchor: (*id, f), head: (*id, f) }); }
         v.close_popup(window, cx);
     };

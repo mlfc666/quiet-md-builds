@@ -16,6 +16,12 @@ fn animate_folding() -> bool { crate::settings::motion_high() }
 /// Where a row at tree depth `depth` is drawn: a top-level folder is a group heading at the left
 /// edge, and what it holds starts there too (no indent for the heading's level).
 fn vx(depth: usize) -> f32 { depth.saturating_sub(1) as f32 * crate::sidebar::INDENT }
+/// Room above every top-level folder's heading but the first, so the groups stand apart:
+/// `g[s]` is what the headings before slot `s` add, and row `i` sits `g[i + 1]` further down.
+fn group_gaps(rows: &[Row]) -> Vec<f32> {
+    let mut acc = 0.;
+    std::iter::once(0.).chain(rows.iter().enumerate().map(|(i, r)| { if i > 0 && r.depth == 0 { acc += crate::sidebar::TOP_GAP; } acc })).collect()
+}
 
 /// A row of the tree; its entry is shared with the cached rows (`RowCache`).
 #[derive(Clone)]
@@ -25,7 +31,7 @@ struct Row { entry: Rc<Entry>, depth: usize }
 /// expanded folders stay as they were: building them
 /// walks every entry, most of a frame in a vault of 15,000 notes.
 #[derive(Default)]
-struct RowCache { key: u64, order: Option<crate::home::Order>, expanded: HashSet<String>, rows: Vec<Row>, parents: HashSet<String> }
+struct RowCache { key: u64, order: Option<crate::folder_page::Order>, expanded: HashSet<String>, rows: Vec<Row>, parents: HashSet<String> }
 
 /// A row whose middle a drop goes into: a plain folder. A document, one with child pages (#357)
 /// too, only opens a slot before or after it (#418): dropping on a page reorders, never nests.
@@ -205,7 +211,7 @@ impl SidebarDrag {
 }
 
 /// A row's face without its controls: the drag ghost and rows on their way out. Folders keep one glyph, open or not.
-fn row_face(e: &Entry) -> Div {
+pub(crate) fn row_face(e: &Entry) -> Div {
     div().h(px(crate::sidebar::ROW_H)).w_full().pl(px(6.)).flex().items_center()
         .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().map(|d| match &e.icon {
             _ if e.meta.folder.is_some() && e.note.is_none() => d.child(icon("folder", crate::sidebar::ROW_ICON, Theme::icon())),
@@ -224,7 +230,7 @@ fn faded(shadows: Vec<BoxShadow>, a: f32) -> Vec<BoxShadow> {
 
 impl Workspace {
     fn drag_rows(&self) -> Vec<Row> {
-        let (key, order) = (self.entries.generation(), self.home.order());
+        let (key, order) = (self.entries.generation(), self.folder_page.order());
         let mut c = self.folder_drag.rows.borrow_mut();
         if c.key != key || c.order != Some(order) || c.expanded != self.expanded {
             c.rows = crate::tree::Tree::with_order(&self.entries, Some(order)).rows(|id| self.expanded.contains(id)).into_iter()
@@ -273,6 +279,7 @@ impl Workspace {
         // Each frame calls this: the rows are only built while a row is dragged.
         if !self.folder_drag.active.as_ref().is_some_and(|d| d.started) { return }
         let rows = self.drag_rows();
+        let g = group_gaps(&rows);
         let Some(d) = self.folder_drag.active.as_mut().filter(|d| d.started) else { return };
         let y = f32::from(d.at.y - d.offset.y - bounds.top()) + crate::sidebar::ROW_H / 2.;
         // never out to the top-level folders' own level: what is moved stays inside one
@@ -282,7 +289,7 @@ impl Workspace {
         let pointer_y = f32::from(d.at.y - bounds.top());
         let folder = rows.iter().enumerate().find(|(i, r)| {
             let top = self.folder_drag.springs.get(&r.entry.id).map_or(
-                (*i + usize::from(*i >= d.index)) as f32 * PITCH, |s| s.p[1]);
+                (*i + usize::from(*i >= d.index)) as f32 * PITCH + g[*i + 1], |s| s.p[1]);
             takes_drop(&r.entry) && pointer_y > top + 5. && pointer_y < top + 26.
                 && f32::from(d.at.x - bounds.left()) >= vx(r.depth)
         });
@@ -300,11 +307,11 @@ impl Workspace {
                 && let Some(f) = self.folder_drag.fx.get_mut(&r.entry.id) { f.pop.v += 4.; }
             return;
         }
-        let slot_y = d.index as f32 * PITCH;
+        let slot_y = d.index as f32 * PITCH + g[d.index.min(rows.len())];
         let in_slot = y >= slot_y && y <= slot_y + PITCH;
         d.hover = None;
         let index = if in_slot { d.index } else {
-            rows.iter().enumerate().filter(|(i, _)| y > (*i + usize::from(*i >= d.index)) as f32 * PITCH + crate::sidebar::ROW_H / 2.).count()
+            rows.iter().enumerate().filter(|(i, _)| y > (*i + usize::from(*i >= d.index)) as f32 * PITCH + g[*i + 1] + crate::sidebar::ROW_H / 2.).count()
         };
         let depth = slot_depth(index.checked_sub(1).and_then(|i| rows.get(i)), rows.get(index), desired);
         let parent = if depth == 0 { None } else { rows[..index].iter().rev().find(|r| r.depth + 1 == depth && r.entry.meta.folder.is_some()).map(|r| r.entry.id.clone()) };
@@ -313,19 +320,20 @@ impl Workspace {
 
     /// Where something dragged in from outside the tree lands at `at`: into the
     /// folder row under it (`takes_drop`), or a slot between rows (as a row being moved gets),
-    /// beside the row below it. `local`: a 本机文件 row, which lands only on the
+    /// beside the row below it.
     /// tree, not back in its own section.
-    pub(crate) fn sidebar_target(&self, at: Point<Pixels>, local: bool) -> Option<crate::sidebar_drop::SidebarDropAt> {
+    pub(crate) fn sidebar_target(&self, at: Point<Pixels>) -> Option<crate::sidebar_drop::SidebarDropAt> {
         use crate::sidebar_drop::SidebarDropAt;
         if !self.list_scroll.bounds().contains(&at) { return None; }
-        let Some(b) = self.folder_drag.bounds.get() else { return (!local).then(SidebarDropAt::top) };
+        let Some(b) = self.folder_drag.bounds.get() else { return Some(SidebarDropAt::top()) };
         let rows = self.drag_rows();
         let y = f32::from(at.y - b.top());
-        // Below the tree: the end of 我的文档 (a 本机文件 row over its own section: nowhere).
-        if y > (rows.len() + 1) as f32 * PITCH + 6. { return (!local).then_some(SidebarDropAt { parent: None, slot: Some((rows.len(), 0)), before: None }); }
+        let g = group_gaps(&rows);
+        // Below the tree: the end of 我的文档.
+        if y > (rows.len() + 1) as f32 * PITCH + g[rows.len()] + 6. { return Some(SidebarDropAt { parent: None, slot: Some((rows.len(), 0)), before: None }); }
         // Rows where they stand with the open slot, as for a row being moved: the hit stays put while they make room.
         let cur = self.sidebar_drop.as_ref().and_then(|t| t.slot).map(|s| s.0);
-        let top_of = |i: usize| (i + usize::from(cur.is_some_and(|c| i >= c))) as f32 * PITCH;
+        let top_of = |i: usize| (i + usize::from(cur.is_some_and(|c| i >= c))) as f32 * PITCH + g[i + 1];
         if let Some((_, r)) = rows.iter().enumerate().find(|(i, r)| takes_drop(&r.entry) && y > top_of(*i) + 5. && y < top_of(*i) + 26.) {
             return Some(SidebarDropAt { parent: Some(r.entry.id.clone()), slot: None, before: None });
         }
@@ -347,7 +355,7 @@ impl Workspace {
     pub(crate) fn end_folder_drag(&mut self, cancel: bool, cx: &mut Context<Self>) {
         let rows = self.drag_rows();
         // 自动排序 decides the order among siblings: a drop that only reorders them springs back.
-        let sorted = self.home.order().field != crate::home::HomeSort::Manual;
+        let sorted = self.folder_page.order().field != crate::folder_page::PageSort::Manual;
         let held = self.folder_drag.active.as_ref().and_then(|d| self.entries.iter().find(|e| e.id == d.id)).map(|e| e.meta.parent.clone());
         let Some(d) = self.folder_drag.active.as_mut() else { return };
         if !d.started { self.folder_drag.active = None; cx.notify(); return; }
@@ -367,7 +375,7 @@ impl Workspace {
         let mut spring = d.ghost;
         if let Some(b) = bounds { spring.p[0] -= f32::from(b.left()); spring.p[1] -= f32::from(b.top()); }
         spring.p[0] -= 3. * lift; spring.p[1] -= lift; spring.p[2] += 6. * lift;
-        spring.target = [vx(depth), index as f32 * PITCH, spring.p[2]];
+        spring.target = [vx(depth), index as f32 * PITCH + group_gaps(&rows).get(index).copied().unwrap_or(0.), spring.p[2]];
         self.folder_drag.springs.insert(movement.id.clone(), spring);
         let fx = self.folder_drag.fx.entry(movement.id.clone()).or_insert_with(RowFx::new);
         fx.show = SHOW;
@@ -387,13 +395,27 @@ impl Workspace {
             self.queue_tree_write(TreeWrite::Move(movement), cx);
             self.sync_sub_pages(cx);
         }
-        if reorder { self.show_toast_kind(crate::ui::ToastKind::Info, crate::settings::tr("自动排序时不能拖动调整顺序，可在文件夹页的「显示」里改为手动排序", "Pages are sorted automatically. Switch to Manual order in a folder's View menu to rearrange them."), cx); }
+        if reorder { self.show_toast_with(crate::design::Toast::new(crate::ui::ToastKind::Info, crate::settings::tr("当前按自动顺序排列", "Pages are sorted automatically"))
+            .description(crate::settings::tr("在文件夹页的「显示」里选「手动排序」后可以拖动", "Choose Manual order in a folder's View menu to drag them")), cx); }
         cx.notify();
     }
 
     /// Put `id` last in `folder` (a drop on a folder card), saved like a sidebar drop.
     pub(crate) fn move_into_folder(&mut self, id: &str, folder: &str, cx: &mut Context<Self>) {
         let mut movement = PendingMove { id: id.to_string(), parent: Some(folder.to_string()), before: None, history: 0, joined: false };
+        let file_before = self.entries.to_vec();
+        self.apply_tree_move(&movement);
+        movement.history = self.remember_tree_move(file_before, crate::settings::tr("拖拽移动", "Drag move"));
+        self.queue_tree_write(TreeWrite::Move(movement), cx);
+        self.sync_sub_pages(cx);
+        cx.notify();
+    }
+
+    /// 手动排序 on a folder's page: `id` put before `before` among its siblings (`None`: last),
+    /// saved and undone like a sidebar drop.
+    pub(crate) fn reorder_page_item(&mut self, id: &str, before: Option<String>, cx: &mut Context<Self>) {
+        let parent = self.entries.iter().find(|e| e.id == id).and_then(|e| e.meta.parent.clone());
+        let mut movement = PendingMove { id: id.to_string(), parent, before, history: 0, joined: false };
         let file_before = self.entries.to_vec();
         self.apply_tree_move(&movement);
         movement.history = self.remember_tree_move(file_before, crate::settings::tr("拖拽移动", "Drag move"));
@@ -416,6 +438,7 @@ impl Workspace {
         let dt = self.folder_drag.last_frame.replace(now).map_or(1. / 120., |last| now.duration_since(last).as_secs_f32().min(0.032));
         self.project_folder_drop();
         let rows = self.drag_rows();
+        let g = group_gaps(&rows);
         let width = self.sidebar_w(window) - 2. * crate::sidebar::SB_X;
         let active = self.folder_drag.active.as_ref().filter(|d| d.started);
         // A row being moved, or something dragged in from outside, opens a slot.
@@ -443,7 +466,7 @@ impl Workspace {
         let fd = &mut self.folder_drag;
         let index: FxHashMap<&str, usize> = rows.iter().enumerate().map(|(i, r)| (r.entry.id.as_str(), i)).collect();
         let targets: Vec<[f32; 3]> = rows.iter().enumerate().map(|(i, r)| {
-            let y = (i + usize::from(slot.is_some_and(|(index, _)| i >= index))) as f32 * PITCH;
+            let y = (i + usize::from(slot.is_some_and(|(index, _)| i >= index))) as f32 * PITCH + g[i + 1];
             let x = vx(r.depth);
             let inset = if receiving.zip(receiving_end).is_some_and(|(start, end)| i >= start && i < end) { 8. } else { 0. };
             [x, y, width - x - inset]
@@ -587,7 +610,7 @@ impl Workspace {
             let full = d.rows.len() as f32 * PITCH;
             if let Some(at) = d.anchor {
                 // Closing at the slot a lifted folder left (one row tall, so the edge starts below it).
-                let top = (at as f32 + 1.) * PITCH + shift.get(at).copied().unwrap_or(0.);
+                let top = (at as f32 + 1.) * PITCH + g[(at + 1).min(rows.len())] + shift.get(at).copied().unwrap_or(0.);
                 d.step(dt, vis_bottom - top, full);
                 moving = true;
                 let edge = (top, top + d.h.max(0.));
@@ -633,7 +656,7 @@ impl Workspace {
         let zone = receiving.zip(receiving_end).map(|(start, end)| {
             let top = drawn[start][1];
             let mut bottom = (start..end).map(|i| drawn[i][1] + crate::sidebar::ROW_H).fold(top, f32::max);
-            if let Some((index, _)) = slot && index > start && index <= end { bottom = bottom.max(index as f32 * PITCH + crate::sidebar::ROW_H); }
+            if let Some((index, _)) = slot && index > start && index <= end { bottom = bottom.max(index as f32 * PITCH + g[index.min(rows.len())] + crate::sidebar::ROW_H); }
             let x = vx(rows[start].depth);
             [x - 3., top - 3., width - x + 3., bottom - top + 6.]
         });
@@ -649,7 +672,7 @@ impl Workspace {
             if !m && a.to == 0. { fd.zone = None; }
         }
         // The slot the row will land in.
-        let slot_target = slot.map(|(index, depth)| [vx(depth), index as f32 * PITCH, width - vx(depth) - if receiving.is_some() { 8. } else { 0. }]);
+        let slot_target = slot.map(|(index, depth)| [vx(depth), index as f32 * PITCH + g[index.min(rows.len())], width - vx(depth) - if receiving.is_some() { 8. } else { 0. }]);
         match (slot_target, &mut fd.slot) {
             (Some(t), Some((s, a))) => { if a.p < 0.02 { *s = Spring::new(t); } s.target = t; a.to = 1.; }
             (Some(t), None) => fd.slot = Some((Spring::new(t), QUICK.from(0., 1.))),
@@ -692,7 +715,7 @@ impl Workspace {
                     .child(el.absolute().left_0().top(px(y - lo)).w(px(w))).into_any_element(),
             }
         };
-        let mut container = div().relative().w_full().h(px(((rows.len() + usize::from(slot.is_some())) as f32 * PITCH + extra).max(0.)))
+        let mut container = div().relative().w_full().h(px(((rows.len() + usize::from(slot.is_some())) as f32 * PITCH + g[rows.len()] + extra).max(0.)))
             .child({ let b = fd.bounds.clone(); canvas(move |bounds, _, _| b.set(Some(bounds)), |_, _, _, _| {}).absolute().inset_0() });
         for l in fd.leaving.values() {
             let [x, y, w] = l.pos.p;
@@ -757,7 +780,7 @@ impl Workspace {
                     cx.notify();
                 }))
                 .when(lift > 0.005, |d| d.child(div().absolute().inset_0().rounded(radius)
-                    .bg(theme::raised(Theme::bg_body()).opacity(lift)).shadow(faded(theme::shadow_panel(), lift))))
+                    .bg(theme::raised(Theme::bg_body()).opacity(lift)).shadow(faded(crate::design::shadow::toast(), lift))))
                 .when(fx.glow.unit() > 0.005, |d| d.child(div().absolute().inset_0().rounded(radius).bg(Theme::sidebar_landed().opacity(fx.glow.unit()))))
                 .when(hover > 0.005, |d| d.child(div().absolute().inset_0().rounded(radius).bg(Theme::sidebar_hover().opacity(hover))))
                 .child(self.doc_row(&r.entry, "doc", 0, r.entry.meta.folder.is_some(), cx));
@@ -833,7 +856,7 @@ impl Workspace {
             let l = d.lift.p.max(0.);
             let inside = d.excluded.len().saturating_sub(1);
             layer = layer.child(div().absolute().left(px(x - 3. * l)).top(px(y - l)).w(px(width + 6. * l)).h(px(crate::sidebar::ROW_H)).pr(px(6.)).rounded(px(crate::sidebar::ROW_R))
-                .bg(theme::raised(Theme::bg_body())).shadow(faded(theme::shadow_panel(), l.min(1.))).flex().items_center().text_color(Theme::text())
+                .bg(theme::raised(Theme::bg_body())).shadow(faded(crate::design::shadow::toast(), l.min(1.))).flex().items_center().text_color(Theme::text())
                 .child(row_face(e).flex_1().min_w_0().pl(px(6. + 3. * l)))
                 .when(inside > 0, |g| g.child(div().flex_none().h(px(18.)).min_w(px(18.)).px(px(5.)).rounded(px(9.)).flex().items_center().justify_center()
                     .bg(Theme::sidebar_drop_slot()).text_size(px(11.)).text_color(Theme::sidebar_text()).font_weight(FontWeight::MEDIUM)

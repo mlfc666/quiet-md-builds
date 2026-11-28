@@ -1,8 +1,8 @@
 //! The panel's pages: each one's live pieces (可操作), then still states to compare (状态对照).
-//! The 数据表's pieces are laid out as the table lays them out, with made-up rows.
+//! The 数据库's pieces are laid out as the table lays them out, with made-up rows.
 
 use super::*;
-use crate::design::{Badge, Button, ButtonSize, Card, Dialog, Field, Popover, Item, Kbd, Label, MenuItem, MenuLabel, MenuSeparator, Radio, Segment, Segmented, Separator, Switch, Textarea, Toast, ToastTone, geo};
+use crate::design::{Badge, Button, ButtonSize, Card, Dialog, Field, Popover, Item, Kbd, Label, MenuItem, MenuLabel, MenuSeparator, Radio, Segment, Segmented, Separator, Slider, Switch, Textarea, Toast, ToastTone, geo};
 
 type Cx<'a> = Context<'a, Gallery>;
 
@@ -34,6 +34,19 @@ fn swatches(g: &Gallery, k: K, n: u8, size: f32, cx: &mut Cx) -> Div {
     }
     d
 }
+/// A slider to press and drag: the value in tenths (`pick`).
+fn slider(g: &Gallery, cx: &mut Cx) -> Stateful<Div> {
+    let at = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
+    let (rec, a, b) = (at.clone(), at.clone(), at);
+    let set = |g: &mut Gallery, x: Pixels, bd: Bounds<Pixels>| {
+        let t = (f32::from(x - bd.left()) - 8.) / (f32::from(bd.size.width) - 16.);
+        g.pick.insert(("sld", 0), (t.clamp(0., 1.) * 10.).round() as usize);
+    };
+    div().id("sld-live").w(px(200.)).relative().py(px(2.)).child(Slider::new("sld-l", g.at(("sld", 0)) as f32 / 10.))
+        .child(canvas(move |bd, _, _| rec.set(bd), |_, _, _, _| {}).absolute().inset_0())
+        .on_mouse_down(MouseButton::Left, cx.listener(move |g, e: &MouseDownEvent, _, cx| { set(g, e.position.x, a.get()); cx.notify() }))
+        .on_mouse_move(cx.listener(move |g, e: &MouseMoveEvent, _, cx| if e.pressed_button == Some(MouseButton::Left) { set(g, e.position.x, b.get()); cx.notify() }))
+}
 fn chevron(open: bool) -> Svg { let i = icon("chevron-down", 14., color::muted_foreground()); if open { i.with_transformation(Transformation::rotate(percentage(0.5))) } else { i } }
 /// A menu of `items` (glyph, name), the picked one ticked: picking sets `k` and closes.
 fn choices(g: &Gallery, k: K, items: &[(&'static str, &'static str)], w: f32, cx: &mut Cx) -> Popover {
@@ -58,7 +71,7 @@ fn field_select(g: &Gallery, k: K, w: f32, cx: &mut Cx) -> Div {
 }
 /// Shuts the gallery's submenu when the pointer reaches a sibling row (Radix).
 fn shut(cx: &mut Cx) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
-    cx.listener(|g: &mut Gallery, on: &bool, _, cx| if *on && g.is(("sub", 0)) { g.on.remove(&("sub", 0)); cx.notify(); })
+    crate::design::sub_hover(cx.listener(|g: &mut Gallery, on: &bool, _, cx| if *on && g.is(("sub", 0)) { g.on.remove(&("sub", 0)); cx.notify(); }))
 }
 fn two(live: Div, still: Div) -> Div { div().flex().flex_col().gap(px(32.)).child(group("可操作", live)).child(group("状态对照", still)) }
 
@@ -150,11 +163,14 @@ pub fn toggles(g: &mut Gallery, _w: &mut Window, cx: &mut Cx) -> Div {
             .child(Segment::new("seg-ic-1", "").icon("view-list").selected(g.at(("seg-ic", 0)) == 1).on_click(tap(cx, |g, _, _| { g.pick.insert(("seg-ic", 0), 1); })))))
         .child(item("Radio", div().flex().gap(px(16.)).children((0..2).map(|i| div().id(("rd", i)).flex().items_center().gap(px(8.)).cursor_pointer()
             .on_click(tap(cx, move |g, _, _| { g.pick.insert(("rd", 0), i); })).child(Radio::new(g.at(("rd", 0)) == i)).child(t(["仅文本", "所有内容"][i]))))))
-        .child(item("颜色（选项、填色）", swatches(g, ("sw-c", 0), 10, 22., cx).w(px(200.))));
+        .child(item("Swatch（选项、填色、画板颜色）", swatches(g, ("sw-c", 0), 10, 22., cx).w(px(200.))))
+        .child(item("Slider（按下、拖动）", slider(g, cx)));
     let still = row()
         .child(item("Checkbox · 关 / 开 / 部分 / 不可用", div().flex().gap(px(16.)).child(checkbox(false)).child(checkbox(true)).child(checkbox(false).partial(true)).child(checkbox(true).disabled(true))))
         .child(item("Radio · 关 / 开 / 不可用", div().flex().gap(px(16.)).child(Radio::new(false)).child(Radio::new(true)).child(Radio::new(true).disabled(true))))
         .child(item("Switch · 关 / 开 / 不可用", div().flex().gap(px(16.)).child(switch(false, true)).child(switch(true, true)).child(switch(true, false))))
+        .child(item("Slider · 0 / 40% / 混合 / 不可用", div().w(px(200.)).flex().flex_col().gap(px(16.))
+            .child(Slider::new("sld0", 0.)).child(Slider::new("sld1", 0.4)).child(Slider::new("sld2", 0.7).mixed(true)).child(Slider::new("sld3", 0.6).disabled(true))))
         .child(item("Segmented · 一段不可用", Segmented::new().w(px(260.)).child(Segment::new("sgd0", "低").selected(true)).child(Segment::new("sgd1", "中等")).child(Segment::new("sgd2", "高").disabled(true))));
     two(live, still)
 }
@@ -253,7 +269,7 @@ pub fn menus(g: &mut Gallery, w: &mut Window, cx: &mut Cx) -> Div {
         .child(item("新建菜单（插画图标）", drop(g, ("new", 0), Button::outline("new-b").icon("plus").label("新建").icon_end("chevron-down"), new, cx)))
         .child(item("排序菜单（标题、勾选，选了不收起）", drop(g, ("sortm", 0), Button::ghost("sort-b").icon("sort-down").label("排序"), sort, cx)))
         .child(item("模式菜单（两行）", drop(g, ("modem", 0), Button::ghost("mode-b").label(mode).icon_end("chevron-down"), modes, cx)));
-    // the 数据表's
+    // the 数据库's
     let k = ("opt", 0);
     let (name, slot) = OPTIONS[g.at(k)];
     let fm = field_menu("fm", None, cx);
@@ -270,13 +286,13 @@ pub fn menus(g: &mut Gallery, w: &mut Window, cx: &mut Cx) -> Div {
     // a submenu, as Radix: open on its row, shut when the pointer reaches a sibling; its row lit while it is open
     let sub_k = ("sub", 0);
     let sub_open = g.is(sub_k);
-    let mut sub = Popover::new("s-sub").menu().w(px(160.));
+    let mut sub = Popover::new("s-sub").menu().submenu().w(px(160.));
     for (i, s) in ["标准", "较宽", "全宽"].into_iter().enumerate() {
         sub = sub.child(MenuItem::new(("sw", i)).label(s).checked(g.at(("width", 0)) == i).on_click(tap(cx, move |g, _, cx| { g.pick.insert(("width", 0), i); g.on.remove(&("sub", 0)); g.say(format!("页面宽度：{s}"), cx); })));
     }
     let doc_live = Popover::new("s-doc").menu().w(px(220.))
         .child(MenuItem::new("sd1").icon("page-width").label("页面宽度").submenu(true).open(sub_open)
-            .on_hover(cx.listener(move |g, on: &bool, _, cx| if *on && !g.is(sub_k) { g.on.insert(sub_k); cx.notify(); }))
+            .on_hover(crate::design::sub_hover(cx.listener(move |g, on: &bool, _, cx| if *on && !g.is(sub_k) { g.on.insert(sub_k); cx.notify(); })))
             .on_click(tap(cx, move |g, _, _| g.flip(sub_k)))
             .when(sub_open, |d| d.child(div().absolute().left_full().top(px(-crate::design::menu::PAD)).child(deferred(anchored().snap_to_window_with_margin(px(8.)).child(div().pl(px(4.)).child(sub))).with_priority(1)))))
         .child(MenuItem::new("sd2").icon("search").label("查找和替换").shortcut("⌘F").on_hover(shut(cx)).on_click(says(cx, "查找和替换")))
@@ -293,7 +309,7 @@ pub fn menus(g: &mut Gallery, w: &mut Window, cx: &mut Cx) -> Div {
         .child(MenuItem::new("sd-1").icon("copy").label("创建副本").shortcut("⌘D"))
         .child(MenuItem::new("sd-2").icon("bin").label("删除").shortcut("⌫").destructive(true).selected(true));
     let still = row().child(item("键盘行亮着（标题、快捷键、缩进、勾选）", lit)).child(item("危险项亮着", lit_d)).child(item("子菜单（悬停「页面宽度」打开，点一下收起）：开着时父行一直亮着；指针移到兄弟行上子菜单收起（Radix）", doc_live).max_w(px(300.))).child(item("字段菜单 · 第二项悬停", field_menu("sfm", Some(1), cx))).child(item("下拉选择 · 第五项悬停", dropl));
-    div().flex().flex_col().gap(px(32.)).child(group("可操作 · 应用", app)).child(group("可操作 · 数据表", table)).child(group("子菜单和状态对照", still))
+    div().flex().flex_col().gap(px(32.)).child(group("可操作 · 应用", app)).child(group("可操作 · 数据库", table)).child(group("子菜单和状态对照", still))
 }
 
 // ---- 对话框 ----
@@ -352,7 +368,7 @@ pub fn dialogs(g: &mut Gallery, w: &mut Window, cx: &mut Cx) -> Div {
     let live = row()
         .child(item("确认（危险）", open(Button::destructive("o1").label("删除文档…"), "delete", cx)))
         .child(item("表单（重命名）", open(Button::outline("o2").label("重命名…"), "rename", cx)))
-        .child(item("数据表 · 新增字段", open(Button::primary("o3").label("新增字段…"), "field", cx)))
+        .child(item("数据库 · 新增字段", open(Button::primary("o3").label("新增字段…"), "field", cx)))
         // one input draws in one place: while a dialog holds the form, it is not drawn here too
         .child(item("表单弹窗本身（类型能展开、选项能加减、色块点一下换）", if g.dialog.is_some() { small("（在弹窗里）").into_any_element() } else {
             Popover::new("form").padded().w(px(340.)).child(form_body(g, w, cx)).child(form_footer(cx)).into_any_element() }));
@@ -372,20 +388,54 @@ pub fn cards(g: &mut Gallery, _w: &mut Window, cx: &mut Cx) -> Div {
     let card = Card::new("card-live").w(px(420.))
         .child(line(("card-sw", 0), "拼写检查", "输入时在拼错的词下画波浪线", cx)).child(Separator::new())
         .child(line(("card-sw", 1), "自动配对括号", "输入左括号时补上右括号", cx));
-    let toasts = div().flex().gap(px(8.))
-        .child(Button::outline("toast-ok").label("成功").on_click(says(cx, "已复制为 Markdown")))
-        .child(Button::outline("toast-err").label("出错").on_click(says(cx, "导入未能完成")));
     // ScrollArea: a menu capped by `Popover::fit` and a square box, each under the shared scrollbar
     let long = (0..14usize).fold(Popover::new("sa-menu").menu().fit(200.).w(px(200.)), |d, i| d.child(MenuItem::new(("sa-item", i)).icon("doc").label(format!("第 {} 项", i + 1)).on_click(says(cx, "滚动菜单"))));
     let boxed = { thread_local! { static H: ScrollHandle = ScrollHandle::new(); } let h = H.with(|h| h.clone());
         div().id("sa-box").w(px(220.)).h(px(160.)).border_1().border_color(color::border()).overflow_y_scroll().track_scroll(&h).p(px(12.)).flex().flex_col().gap(px(8.))
             .children((0..16usize).map(|i| t(&format!("第 {} 行正文", i + 1)))).child(crate::design::scroll::bar("gallery-sa-box", &h, 0.)) };
-    let live = row().child(item("Card + Item（设置分组，开关能点）", card)).child(item("Toast（在面板底部提示）", toasts))
+    let live = row().child(item("Card + Item（设置分组，开关能点）", card))
         .child(item("ScrollArea · 菜单限高（悬停、滚动显示，可拖）", long)).child(item("ScrollArea · 方框", boxed));
     let still = row()
-        .child(item("Separator · 横 / 竖", div().w(px(200.)).flex().flex_col().gap(px(12.)).child(t("上")).child(Separator::new()).child(div().h(px(20.)).flex().gap(px(12.)).child(t("左")).child(Separator::new().vertical()).child(t("右")))))
-        .child(item("Toast · 成功 / 出错 / 提示", div().flex().flex_col().gap(px(8.)).child(Toast::new(ToastTone::Success, "已复制为 Markdown"))
-            .child(Toast::new(ToastTone::Error, "导入未能完成")).child(Toast::new(ToastTone::Info, "正在导入…"))));
+        .child(item("Separator · 横 / 竖", div().w(px(200.)).flex().flex_col().gap(px(12.)).child(t("上")).child(Separator::new()).child(div().h(px(20.)).flex().gap(px(12.)).child(t("左")).child(Separator::new().vertical()).child(t("右")))));
+    two(live, still)
+}
+
+// ---- 提示 ----
+
+const LONG: &str = "已原位打开「我的 Obsidian 笔记库（2019—2026 年的读书笔记、工作日志和旅行计划都在这里）」，以后在 Obsidian 里改的内容会直接显示在这里，在这里改的也会写回原来的文件";
+
+/// The toasts the 提示 page's buttons and samples show.
+fn sample(which: usize) -> Toast {
+    match which {
+        0 => Toast::new(ToastTone::Success, "已复制为 Markdown"),
+        1 => Toast::new(ToastTone::Error, "导出失败，请重试"),
+        2 => Toast::new(ToastTone::Info, "正在导入…"),
+        3 => Toast::new(ToastTone::Success, "已复制「周报」到「工作」").description("原文件夹保持原样"),
+        4 => Toast::new(ToastTone::Success, "已删除「周报」").action("撤销", |_, _| {}),
+        5 => Toast::new(ToastTone::Info, LONG),
+        _ => Toast::new(ToastTone::Info, "正在同步 3 个文件").description("点左上角的 × 可以先关掉").close_button(),
+    }
+}
+
+pub fn toasts(_g: &mut Gallery, _w: &mut Window, cx: &mut Cx) -> Div {
+    let push = |id: &'static str, name: &'static str, which: &'static [usize], cx: &mut Cx| Button::outline(id).label(name).on_click(cx.listener(move |_, _, window: &mut Window, cx| {
+        for &i in which {
+            let t = sample(i);
+            // the action says it ran, here at the panel's foot
+            let t = if i == 4 { let me = cx.entity().downgrade(); t.action("撤销", move |_, cx| { let _ = me.update(cx, |g, cx| g.say("撤销了「已删除「周报」」", cx)); }) } else { t };
+            crate::design::toast::show(window.window_handle(), t, cx);
+        }
+    }));
+    let live = row()
+        .child(item("弹出到窗口顶部（悬停暂停并展开，Esc 关掉最前面一条）", div().flex().flex_wrap().gap(px(8.)).w(px(560.))
+            .child(push("tp-ok", "成功", &[0], cx)).child(push("tp-err", "出错", &[1], cx)).child(push("tp-info", "提示", &[2], cx))
+            .child(push("tp-desc", "带描述", &[3], cx)).child(push("tp-act", "带撤销（6 秒）", &[4], cx)).child(push("tp-long", "长文案", &[5], cx))
+            .child(push("tp-close", "带关闭按钮", &[6], cx)).child(push("tp-stack", "连出三条（堆叠）", &[0, 3, 4], cx))));
+    let col = |v: &[usize]| v.iter().fold(div().flex().flex_col().gap(px(14.)), |d, &i| d.child(sample(i)));
+    let still = row()
+        .child(item("Toast · 成功 / 出错 / 提示", col(&[0, 1, 2])))
+        .child(item("带描述 / 带操作 / 带关闭按钮", col(&[3, 4, 6])))
+        .child(item("长文案：换行，三行后加省略号", col(&[5])));
     two(live, still)
 }
 
@@ -469,7 +519,7 @@ pub fn bars(g: &mut Gallery, _w: &mut Window, cx: &mut Cx) -> Div {
     let lit = g.is(("focus-top", 0));
     let focus = div().id("focus-top").w(px(420.)).h(px(48.)).px(px(12.)).flex().items_center().border_b_1().border_color(line())
         .on_hover(tap(cx, |g, _, _| g.flip(("focus-top", 0))))
-        .child(div().opacity(if lit { 1. } else { 0. }).child(crate::focus::exit_button("focus-exit").on_click(says(cx, "退出专注模式"))));
+        .justify_end().child(div().opacity(if lit { 1. } else { 0. }).child(crate::focus::exit_button("focus-exit").on_click(says(cx, "退出"))));
     let live = row().child(item("工具栏（工具点一下切换在用）", bar)).child(item("勾选记录后的操作条", selbar)).child(item("表内搜索（能打字，上一个 / 下一个）", find))
         .child(item("专注模式的顶栏（鼠标移上来出现）", focus));
     div().flex().flex_col().gap(px(32.)).child(group("可操作", live))

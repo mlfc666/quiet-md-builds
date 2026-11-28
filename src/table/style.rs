@@ -1,4 +1,4 @@
-//! 数据表's look: the table-only parts of the design system (grid sizes, option colours, the
+//! 数据库's look: the table-only parts of the design system (grid sizes, option colours, the
 //! selection's marks) and short forwards to its components (`crate::design`), under the names the
 //! table's code uses. Grid sizes the design system has no counterpart for (toolbar, record panel) stay
 //! 飞书 多维表格's (docs/design/feishu-research/REPORT.md).
@@ -7,10 +7,9 @@ pub use crate::design::icon;
 use crate::design::{Button, ButtonSize, Checkbox, Field, FieldSize, Label, MenuItem, MenuLabel, MenuSeparator, Segment, Segmented, Switch, Badge, chip, color, geo, shadow};
 use crate::table::FieldType;
 use fdl_core::table::RowHeight;
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 
-/// The 数据表's palette under the names its code uses (the app's `Theme` methods), drawn from the
+/// The 数据库's palette under the names its code uses (the app's `Theme` methods), drawn from the
 /// design system's semantic colours.
 pub struct Theme;
 impl Theme {
@@ -96,7 +95,7 @@ pub fn ring() -> Hsla { crate::theme::Theme::primary() }
 /// A range selection's fill over the cells.
 pub fn range_bg() -> Hsla { color::muted() }
 pub fn star() -> Hsla { crate::theme::c(crate::theme::craft::O350) }
-// 查找's hits and the current one: 飞书多维表格's two yellows, as the first 数据表 took them (4cf23b9).
+// 查找's hits and the current one: 飞书多维表格's two yellows, as the first 数据库 took them (4cf23b9).
 // The design system has no highlight token yet; these stay until it does.
 // In the dark both are the yellow as a dim tint under the page's ink (`theme::mark`), the current
 // one the stronger: mirrored, the current one stayed a bright yellow under white text (1.5:1).
@@ -230,12 +229,7 @@ pub fn close_btn(id: impl Into<ElementId>) -> Button { Button::ghost(id).icon("x
 pub fn seg_track() -> Segmented { Segmented::new() }
 pub fn segment(id: impl Into<ElementId>, on: bool, label: impl Into<SharedString>) -> Segment { Segment::new(id, label).selected(on) }
 
-/// A colour swatch to pick (the option colours, 填色), `size` square: picked, a `ring` round it.
-pub fn swatch(id: impl Into<ElementId>, fill: Hsla, size: f32, picked: bool) -> Stateful<Div> {
-    let r = geo().menu_row_r;
-    div().id(id).flex_none().size(px(size)).rounded(px(r)).bg(fill).cursor_pointer()
-        // borders, not rings in the shadow: GPUI paints a shadow under the box too, and the fills are translucent
-        .when(picked, |d| d.border_2().border_color(color::ring()))
-        .when(!picked, |d| d.border_1().border_color(color::border()))
-}
+/// A colour swatch to pick (the option colours, 填色), `size` square: picked, a `ring` round it
+/// (`design::Swatch`).
+pub fn swatch(id: impl Into<ElementId>, fill: Hsla, size: f32, picked: bool) -> crate::design::Swatch { crate::design::Swatch::new(id, fill).sized(size).selected(picked) }
 

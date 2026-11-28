@@ -36,7 +36,7 @@ bench "wheel 900 500 40" x100: step [p50 0.01 p95 0.02 max 0.02] frame [p50 2.08
 
 ## Reproduce the benchmark
 
-The test uses a temporary library and leaves `~/Documents/Quiet.md` untouched.
+The test uses a temporary library and leaves the default library (`~/Documents/Quiet Notes`, or `Quiet.md` from earlier versions) untouched.
 
 ```sh
 cargo build --release --locked --features devtools
@@ -120,7 +120,7 @@ Measured 2026-11-25 on an Apple M6 Mac mini (16 GiB, macOS 27.2.1), 1280 × 800 
 | this change | up | 4.2 ms | 0 / 0 | 0.05 ms | 4.3 ms | 0.08 ms |
 | this change | held at the edge | 6.9 ms | 1 / 27 | 0.04 ms | 6.4 ms | 0.09 ms |
 
-- Before, a drag cost about 16 ms of `render` a frame whatever moved, from three walks of the whole document: the selection's word count and the set of selected blocks each listed the selected blocks again every frame (`block_sel_ids` walks every block twice and indexes their paths), and the word count built an index of every block. A dragged block is selected, so every frame paid it. Both are now kept until the selection or the document changes. The same cost was paid by any frame with blocks selected, not only while dragging.
+- Before, a drag cost about 16 ms of `render` a frame whatever moved, from walks of the whole document: the set of selected blocks was listed again every frame (`block_sel_ids` walks every block twice and indexes their paths). A dragged block is selected, so every frame paid it. It is now kept until the selection or the document changes. (The selection's word count, which walked it too, has since gone.) The same cost was paid by any frame with blocks selected, not only while dragging.
 - Finding the drop under the pointer (each drag event and each frame) walked every top-level block (tens of thousands) and indexed every block: 5-7 ms. It now walks only the top-level blocks the page drew rows of.
 - Held at the edge, the page scrolls 600 pt/s and lays out rows it has not shown yet; that is what is left (as when scrolling).
 - Pages not being dragged draw as before: screenshots of the test document (still, hovered, block menu, selected, scrolled), the compilation (top and two wheel positions) and [menus.txt](../tools/harness/examples/menus.txt) are identical to main's, pixel for pixel (`tools/harness/compare.py`).
@@ -242,7 +242,7 @@ What is left of `list` is finding the files (`layout::scan` and a `stat` for eac
 
 The first `list` reads every note (no parse cache yet), and the first folder opened under 手动排序 numbers every page (`initialize_manual_order`, a write of every entry). Both ran on the main thread before the window's first frame, which stayed empty meanwhile.
 
-Now ([loading.rs](../src/loading.rs)) a `tree_writer` of each top-level folder lists it (and numbers its pages) on a background thread, counting into a `ListProgress`, and hands everything back at once; the main store takes over what it read (`Store::adopt`). The window waits up to 150 ms for it before its first frame, so a small or already-read library opens exactly as before. Past that, sidebar and 主页 stay empty until 300 ms, then grey rows and the onboarding's drifting light show how far it got (正在载入 3,214 / 15,000 篇), and fade out over what was found, from the second frame after the hand-back.
+Now ([loading.rs](../src/loading.rs)) a `tree_writer` of each top-level folder lists it (and numbers its pages) on a background thread, counting into a `ListProgress`, and hands everything back at once; the main store takes over what it read (`Store::adopt`). The window waits up to 150 ms for it before its first frame, so a small or already-read library opens exactly as before. Past that, sidebar and 主页 stay empty until 300 ms, then grey rows and a drifting light show how far it got (正在载入 3,214 / 15,000 篇), and fade out over what was found, from the second frame after the hand-back.
 
 Meanwhile search, 新建 and the imports say the library is still loading and do nothing, rather than queue work that would happen by surprise later; a Markdown file opened from the Finder or dropped on the window opens where it is. Listing meanwhile (after such a write) reads no note, and the hand-back then lists once more, with every note already read.
 

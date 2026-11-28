@@ -163,8 +163,8 @@ pub struct ImageUi {
     lightbox: Option<Lightbox>,
     lb_focus: FocusHandle,
     chrome_task: Option<Task<()>>,
-    toast: Option<(ToastKind, SharedString, Instant)>,
-    toast_task: Option<Task<()>>,
+    /// The window its toasts go to (`design::toast`).
+    window: AnyWindowHandle,
     remote: RefCell<HashMap<String, Remote>>,
     remote_dir: PathBuf,
     /// Bumped when remote images arrive or are retried (every row re-measures).
@@ -181,7 +181,7 @@ type Decoded = Result<Arc<RenderImage>, ImageCacheError>;
 /// its frames, so its pixels are kept.
 struct Slot { path: Option<Arc<Path>>, image: Option<Decoded>, used: Instant, windows: HashMap<WindowId, Instant>, generation: Arc<()>, waiters: Vec<EntityId>, ready: Option<Instant>, whole: bool, wanted: Arc<AtomicU64> }
 
-/// Decoded document pictures (editor and Home cards). gpui's global asset
+/// Decoded document pictures (editor and folder page cards). gpui's global asset
 /// cache keeps every image it has decoded until the app quits; this one lets go
 /// of pictures unused for 30 seconds, or sooner when the offscreen cache
 /// exceeds 64 MiB, freeing their pixels and atlas textures. Pictures are
@@ -576,7 +576,7 @@ impl ImageCache for DocImages {
 }
 
 impl ImageUi {
-    pub fn new(cx: &mut App) -> Self {
+    pub fn new(window: AnyWindowHandle, cx: &mut App) -> Self {
         ImageUi {
             dims: RefCell::default(),
             boxes: Rc::default(),
@@ -588,8 +588,7 @@ impl ImageUi {
             lightbox: None,
             lb_focus: cx.focus_handle(),
             chrome_task: None,
-            toast: None,
-            toast_task: None,
+            window,
             remote: RefCell::default(),
             remote_dir: Store::assets_dir().join("remote"),
             generation: 0,
@@ -1747,9 +1746,6 @@ impl Editor {
 
     /// Animations, the fit and the end of the closing fade.
     pub(super) fn tick_image_ui(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.img.toast.as_ref().is_some_and(|(_, _, t)| t.elapsed() >= Duration::from_secs(3)) {
-            self.img.toast = None;
-        }
         if !cx.has_active_drag() {
             self.img.file_drop = None;
         }
@@ -1864,7 +1860,8 @@ impl Editor {
         let close = div()
             .id("lb-close")
             .absolute()
-            .top(px(20.))
+            // Windows and Linux draw their caption buttons in the header's top right: clear the row
+            .top(px(if cfg!(any(target_os = "windows", target_os = "linux")) { crate::app::HEADER_H + 12. } else { 20. }))
             .right(px(20.))
             .size(px(40.))
             .rounded_full()
@@ -1923,7 +1920,7 @@ impl Editor {
             .bg(theme::rgbaf(0x14, 0x15, 0x17, 0.78))
             .border_1()
             .border_color(theme::rgbaf(255, 255, 255, 0.1))
-            .shadow(theme::shadow_panel())
+            .shadow(crate::design::shadow::popover())
             .flex()
             .items_center()
             .font_family(theme::ui_family())
@@ -2041,26 +2038,13 @@ impl Editor {
         self.toast_kind(ToastKind::Error, msg, cx);
     }
 
-    pub fn clear_toast(&mut self, cx: &mut Context<Self>) {
-        if self.img.toast.take().is_some() {
-            cx.notify();
-        }
-    }
-
     pub(super) fn toast_kind(&mut self, kind: ToastKind, msg: &str, cx: &mut Context<Self>) {
-        self.img.toast = Some((kind, SharedString::from(msg.to_string()), Instant::now()));
-        // One toast at a time: this one replaces the workspace's.
-        cx.emit(super::view::EditorEvent::Toast);
-        self.img.toast_task = Some(cx.spawn(async |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(2700)).await;
-            let _ = this.update(cx, |_, cx| cx.notify());
-        }));
-        cx.notify();
+        self.toast_with(crate::design::Toast::new(kind, msg.to_string()), cx);
     }
 
-    pub(super) fn toast_el(&self, window: &mut Window) -> Option<AnyElement> {
-        let (kind, msg, t0) = self.img.toast.as_ref()?;
-        crate::editor_ui::toast_el(*kind, msg, *t0, window)
+    /// A toast with a description or an action, in front of the window's stack.
+    pub(super) fn toast_with(&mut self, t: crate::design::Toast, cx: &mut Context<Self>) {
+        crate::design::toast::show(self.img.window, t, cx);
     }
 
     // ---- inserting

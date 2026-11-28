@@ -68,13 +68,13 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 新建 › 数据表: a standalone `.sqlite` file in `parent`, opened at once.
+    /// 新建 › 数据库: a standalone `.sqlite` file in `parent`, opened at once.
     pub(crate) fn create_table(&mut self, parent: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.create_menu = None;
         let p = parent.clone();
         if !self.save_before(cx, move |w, window, cx| w.create_table(p.clone(), window, cx)) { return; }
         let file_before = self.store.track_file_changes();
-        match self.store.create_table_in(crate::settings::text("未命名数据表"), &crate::table::blank_base(), parent.as_deref()) {
+        match self.store.create_table_in(crate::settings::text("未命名数据库"), &crate::table::blank_base(), parent.as_deref()) {
             Ok(id) => {
                 self.search_open = false;
                 self.doc_info = None;
@@ -86,32 +86,8 @@ impl Workspace {
             }
             Err(e) => self.status = crate::app::SaveStatus::Failed(crate::localized_format!("新建失败：{}", "Could not create document: {}", crate::settings::diagnostic(&e.to_string()))),
         }
-        self.remember_files(file_before, tr("新建数据表", "New data table"));
+        self.remember_files(file_before, tr("新建数据库", "New database"));
         cx.notify();
-    }
-
-    pub(crate) fn copy_folder(&mut self, id: &str, cx: &mut Context<Self>) -> Option<String> {
-        let ids = crate::tree::Tree::new(&self.entries).subtree(id);
-        let mut copied = std::collections::HashMap::<String, String>::new();
-        for key in ids {
-            let Some(entry) = self.entries.iter().find(|e| e.id == key).cloned() else { continue };
-            let parent = entry.meta.parent.as_ref().map(|p| copied.get(p).cloned().unwrap_or_else(|| p.clone()));
-            let result = if entry.meta.folder.is_some() {
-                let title = if key == id { crate::localized_format!("{} 副本", "{} copy", entry.title) } else { entry.title };
-                self.store.create_folder(&title, parent.as_deref())
-            } else {
-                self.store.load(&key).and_then(|doc| self.store.create_from(&doc)).and_then(|new| {
-                    self.store.set_parent(&new, parent.as_deref())?;
-                    self.store.set_width(&new, entry.meta.width)?;
-                    Ok(new)
-                })
-            };
-            match result {
-                Ok(new) => { copied.insert(key, new); }
-                Err(e) => { self.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx); return None; }
-            }
-        }
-        copied.remove(id)
     }
 
     pub(crate) fn creation_parent(&self) -> Option<String> {
@@ -131,8 +107,7 @@ impl Workspace {
         if self.folder_current.as_deref() != Some(id) { self.reset_folder_scroll(); }
         if let Some(meta) = self.store.touch(id) && let Some(entry) = self.entries.edit().iter_mut().find(|e| e.id == id) { entry.meta = meta; }
         self.schedule_view_state(cx);
-        if self.manual_home_sort() { self.prepare_manual_order(cx); }
-        // 只看收藏 belongs to the page it was turned on in.
+        if self.manual_page_sort() { self.prepare_manual_order(cx); }
         self.folder_current = Some(id.to_string());
         self.view = View::Folder;
         self.row_menu = None;
@@ -168,23 +143,10 @@ impl Workspace {
     pub(crate) fn render_create_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (parent, pos) = self.create_menu.clone()?;
         // A header "+" sits at the right edge, so its menu hangs by its right edge.
-        let header_new = ["create-folder", "create-home"].iter().any(|k| self.home.anchor(k).is_some_and(|b| crate::design::hang(b, crate::design::Align::End, None).0 == pos));
+        let header_new = self.folder_page.anchor("create-folder").is_some_and(|b| crate::design::hang(b, crate::design::Align::End, None).0 == pos);
         let corner = if header_new { Anchor::TopRight } else { Anchor::TopLeft };
-        // 我的文档's "+": it holds no files, so it only opens — 打开文件夹, a folder used where it is,
-        // or a single file. Making and importing happen in a folder.
-        if parent.is_none() {
-            return Some(deferred(anchored().anchor(corner).position(pos).snap_to_window_with_margin(px(8.)).child(
-                crate::design::Popover::new("create-items").menu().fit(crate::design::room(pos, corner)).w(px(crate::design::menu_w::MD))
-                    .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.create_menu = None; cx.notify(); }))
-                    .child(crate::design::MenuItem::new("create-open-folder").icon("folder-plus").label(tr("打开文件夹…", "Open Folder…"))
-                        .description(tr("原位打开", "Opens in place"))
-                        .on_click(cx.listener(|w, _, window, cx| { w.create_menu = None; w.open_folder_dialog(window, cx) })))
-                    // the other way in from this computer, under 本机文件
-                    .child(crate::design::MenuItem::new("create-open-file").icon("doc-md").label(tr("打开 Markdown 文件…", "Open Markdown File…"))
-                        .description(tr("原位编辑", "Edits in place"))
-                        .on_click(cx.listener(|w, _, window, cx| { w.create_menu = None; w.open_file_dialog(window, cx) })))
-            )).with_priority(3).into_any_element());
-        }
+        // Only a folder's "+" opens this menu: the sidebar's opens a folder straight away.
+        let parent = Some(parent?);
         // Every 新建 menu ends with the 导入 rows, into the same place it makes things: the same
         // rows each time it opens, whichever "+" opened it.
         let import = self.import_items(parent.clone(), cx);
@@ -205,8 +167,8 @@ impl Workspace {
             row("create-document", "doc", tr("文档", "Document")).on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.create_doc(false, doc_parent.clone(), window, cx) })),
             row("create-markdown", "markdown", "Markdown").on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.create_doc(true, md_parent.clone(), window, cx) })),
         ];
-        // 数据表 above 画板 (the maintainer, 2026-11-25: the more finished of the two first).
-        out.push(row("create-table", "datatable", crate::settings::text("数据表")).on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.create_table(table_parent.clone(), window, cx) })));
+        // 数据库 above 画板 (the maintainer, 2026-11-25: the more finished of the two first).
+        out.push(row("create-table", "datatable", crate::settings::text("数据库")).on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.create_table(table_parent.clone(), window, cx) })));
         out.push(row("create-board", "board", crate::settings::text("画板")).on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.create_board(board_parent.clone(), window, cx) })));
         out.push(row("create-folder", "folder", tr("文件夹", "Folder")).on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.new_folder(folder_parent.clone(), window, cx) })));
         out
@@ -232,7 +194,7 @@ impl Workspace {
             div().id(SharedString::from(format!("folder-crumb-{key}"))).no_drag().flex_none().max_w(px(220.)).px(px(4.)).rounded(px(6.))
                 .overflow_hidden().whitespace_nowrap().text_ellipsis().cursor_pointer()
                 .text_color(crate::ui::crumb_ink()).hover(|s| s.text_color(crate::ui::crumb_page()))
-                .child(ui_text(label))
+                .child(ui_text(label).optical())
                 .on_click(cx.listener(move |w, _, window, cx| match &target { Some(t) => w.open(t, window, cx), None => w.show_view(View::Default, cx) }))
         };
         // The path starts at its top-level folder, by that folder's name (W5).
@@ -250,7 +212,7 @@ impl Workspace {
             crumbs = crumbs.child(sep()).child(link(e.id.clone(), display_title(&e.title), Some(e.id.clone())));
         }
         crumbs.when(!own, |d| d.child(sep())).child(div().min_w_0().px(px(4.)).overflow_hidden().whitespace_nowrap().text_ellipsis()
-            .text_color(crate::ui::crumb_page()).child(ui_text(title)))
+            .text_color(crate::ui::crumb_page()).child(ui_text(title).optical()))
     }
 
     /// The folder shown when no page is picked (`View::Default`): the documents folder, else the first top-level folder.
@@ -266,26 +228,36 @@ impl Workspace {
         let id = self.folder_current.clone().unwrap_or_default();
         let header = self.topbar(&id, window, cx);
         let children = self.level_entries(Some(&id));
+        // the grid scrolls right up to the header: its 8 above the cards is inside the list (`render_page_grid`),
+        // not a band between, where a scrolling row was cut off 8 under the header
+        let grid = self.folder_page.grid && !children.is_empty();
         let body = if children.is_empty() {
             crate::trash::empty_state("illus/empty-list.svg", tr("这个文件夹还是空的", "This folder is empty")).into_any_element()
-        } else if self.home.grid { self.render_home_grid(&children, window, cx) } else { self.render_home_list(&children, cx) };
-        div().size_full().flex().flex_col().child(header).child(div().h(px(8.)).flex_none()).child(body).into_any_element()
+        } else if grid { self.render_page_grid(&children, window, cx) } else { self.render_page_list(&children, cx) };
+        div().size_full().flex().flex_col().child(header).when(!grid, |d| d.child(div().h(px(8.)).flex_none())).child(body).into_any_element()
     }
 
     pub(crate) fn folder_row_menu(&self, m: crate::app::RowMenu, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let (doc, folder, rename, mv, del) = (m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone());
+        let (doc, folder, rename, dup, mv, del) = (m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone());
         let row = |id: &'static str, glyph: &'static str, label: &'static str| crate::design::MenuItem::new(id).icon(glyph).label(label);
         let pos = m.pos;
         // The row's "…" only manages the folder (新建 is the "+" beside it); a
         // right-click still creates straight from the menu. The folder page's header "…"
         // is this same menu, its "+" the same 新建 menu.
         let create = m.from.is_none();
+        // the page header's "…" leads with 批量管理 over the page (the header has no button of its own), as a
+        // top-level folder's "…" does
+        let page = m.from.as_deref() == Some(crate::folder_page::header::TB_MORE);
         vec![deferred(anchored().anchor(m.corner).position(pos).snap_to_window_with_margin(px(8.)).child(crate::design::Popover::new("folder-row-menu").menu().fit(crate::design::room(pos, m.corner)).w(px(crate::design::menu_w::SM))
             .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.row_menu = None; cx.notify(); }))
+            .when(page, |d| d.child(row("fr-batch", "batch", crate::settings::text("批量管理"))
+                .on_click(cx.listener(|w, _, _, cx| { w.row_menu = None; w.batch = Some(vec![]); w.batch_top = None; w.folder_page.view_menu = false; cx.notify(); }))))
             .when(create, |d| d
                 .child(row("fr-new-doc", "doc", tr("新建文档", "New document")).on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.new_child(&doc, window, cx); })))
                 .child(row("fr-new-folder", "folder", tr("新建文件夹", "New folder")).on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.new_folder(Some(folder.clone()), window, cx); }))))
-            .child(row("fr-rename", "square-pen", tr("重命名", "Rename")).on_click(cx.listener(move |w, _, window, cx| w.start_rename(&rename, window, cx))))
+            .child(row("fr-rename", "pen-line", tr("重命名", "Rename")).on_click(cx.listener(move |w, _, window, cx| w.start_rename(&rename, window, cx))))
+            // the folder with everything in it, in the background, as a document's 创建副本 is
+            .child(row("fr-copy", "copy", tr("创建副本", "Duplicate")).on_click(cx.listener(move |w, _, window, cx| w.duplicate_doc(&dup, window, cx))))
             .child(row("fr-move", "folder-input", tr("移动到", "Move to")).on_click(cx.listener(move |w, _, window, cx| w.open_move(vec![mv.clone()], window, cx))))
             .when_some(self.store.folder_dir(Some(&m.id)), |d, dir| d.child(row("fr-reveal", "folder", crate::local_folders::show_in_files()).on_click(cx.listener(move |w, _, _, cx| { w.row_menu = None; cx.reveal_path(&dir); cx.notify(); }))))
             .child(row("fr-delete", "bin", tr("删除", "Delete")).on_click(cx.listener(move |w, _, _, cx| w.ask_delete(&del, cx))))))
@@ -304,12 +276,12 @@ impl Workspace {
         let open = self.crumb_menu.is_some();
         div().id(key).no_drag().relative().flex_none().size(px(20.)).flex().items_center().justify_center().rounded(px(4.)).cursor_pointer()
             .text_color(crate::ui::crumb_ink()).hover(|s| s.text_color(crate::ui::crumb_page())).when(open, |d| d.text_color(crate::ui::crumb_page()))
-            .child(self.home.track(key)).child("…")
+            .child(self.folder_page.track(key)).child("…")
             .when(!open, |d| d.tip(&path, None))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |w, _: &ClickEvent, _, cx| {
                 // hung from the measured "…", never the pointer
-                let Some(b) = w.home.anchor(key) else { return };
+                let Some(b) = w.folder_page.anchor(key) else { return };
                 let (pos, corner) = crate::design::hang(b, crate::design::Align::Start, None);
                 w.crumb_menu = if w.crumb_menu.is_some() { None } else { Some((hidden.clone(), pos, corner)) };
                 cx.notify();

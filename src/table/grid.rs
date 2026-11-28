@@ -187,10 +187,11 @@ impl TableView {
             FieldType::Note => if typed.is_none() { notes::open_cell(self, cell, under.unwrap_or_default(), window, cx); },
             FieldType::Rating => if let Some(n) = typed.and_then(|s| s.parse::<f64>().ok()) { let tid = self.table; self.edit(cx, |d| d.set_cells(tid, vec![(cell.0, cell.1, Value::Number(n))])); },
             _ => {
-                let text = typed.map_or(text, str::to_string);
                 // text wraps in the cell, which grows down while it is edited (`edit_overlay`), ⇧⏎ breaking
                 // the line; a number stays on its line, right-aligned
-                self.input.update(cx, |t, cx| { t.align = if ty.numeric() { crate::model::Align::Right } else { crate::model::Align::Left }; t.wrap = ty.textual(); t.shift_newline = ty == FieldType::Text; t.font = Some(crate::theme::DOC_UI_FONT); t.set_text(&text, cx); });
+                self.input.update(cx, |t, cx| { t.align = if ty.numeric() { crate::model::Align::Right } else { crate::model::Align::Left }; t.wrap = ty.textual(); t.shift_newline = ty == FieldType::Text; t.font = Some(crate::theme::DOC_UI_FONT);
+                    // typed over: ⌘Z in the field goes back to what the cell held
+                    match typed { Some(s) => t.set_text_typed_over(&text, s, cx), None => t.set_text(&text, cx) } });
                 window.focus(&self.input.focus_handle(cx), cx);
                 self.editing = Some(cell);
             }
@@ -458,15 +459,16 @@ pub(crate) fn render(v: &TableView, base: &Base, t: &Table, view: &View, window:
                 // the name first: narrow, the type goes (wrapped onto a second line, cut off) before the name is cut short
                 div().flex_1().min_w_0().h(px(20.)).overflow_hidden().flex().flex_wrap().content_start().items_center().gap_x(px(6.))
                     .child(div().flex_none().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::MEDIUM).text_color(header_text()).child(ui_text(f.name.clone())))
-                    .child(div().id(("tb-hdr-type", fid)).flex_none().px(px(4.)).mx(px(-4.)).rounded(px(crate::design::geo().tool_r)).cursor_pointer()
+                    .child(div().id(("tb-hdr-type", fid)).relative().flex_none().px(px(4.)).mx(px(-4.)).rounded(px(crate::design::geo().tool_r)).cursor_pointer()
                         .text_size(px(text_xs())).text_color(Theme::text_placeholder()).hover(|s| s.bg(Theme::fill_hover_strong()).text_color(Theme::text_caption()))
-                        .whitespace_nowrap().child(crate::settings::label(f.ty.label()))
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |v, ev: &MouseDownEvent, window, cx| {
+                        .whitespace_nowrap().child(crate::settings::label(f.ty.label())).child(v.anchor(format!("tb-hdr-type-{fid}")))
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |v, _: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             window.focus(&v.focus, cx);
                             v.col_sel = vec![fid];
                             v.sel = None;
-                            menus::edit_field(v, fid, point(ev.position.x - px(12.), ev.position.y + px(16.)), window, cx);
+                            // hung from the type's words, as a button's menu is, not the pointer
+                            v.hang_popup(&format!("tb-hdr-type-{fid}"), crate::design::Align::Start, |v, pos| menus::edit_field(v, fid, pos, window, cx));
                         })))
                     .into_any_element()
             })
@@ -751,7 +753,7 @@ pub(crate) fn render(v: &TableView, base: &Base, t: &Table, view: &View, window:
                     .when_some(tint, |d, slot| d.bg(row_tint(slot)))
                     .when(checked, |d| d.bg(sel_bg()))
                     // lifted: over the rest, a card riding the pointer
-                    .when(dragging, |d| d.bg(Theme::bg_body()).opacity(0.92).shadow(crate::design::shadow::popover()))
+                    .when(dragging, |d| d.bg(Theme::bg_body()).opacity(0.92).shadow(crate::design::shadow::toast()))
                     .child(fz).child(div().flex_1().min_w_0().h_full().overflow_hidden().child(sc))
                     .children(dragged_col.map(|c| ghost_col(cell(c).into_any_element(), ghost, Theme::bg_body())));
                 if dragging { lifted.push(row.into_any_element()); } else { body = body.child(row); }
@@ -793,6 +795,9 @@ pub(crate) fn render(v: &TableView, base: &Base, t: &Table, view: &View, window:
     let max_x = (wide - vs.width).max(0.);
     let max_y = (tall - vs.height).max(0.);
     let corner = if inline { frame_r() } else { SHEET_R };
+    // the frozen columns' shadow is cast by a block just inside their edge, from the frame's top to its foot,
+    // only what falls past it shown
+    let caster = || div().absolute().left(px(-24.)).w(px(24.)).bg(Theme::bg_body()).shadow(crate::design::shadow::sticky());
     div().id("tb-grid").relative().flex_1().min_h_0().flex().flex_col()
         // in a page, a frame around the header and the rows only
         .child(div().relative().flex_1().min_h_0().flex().flex_col().when(inline, |d| d.rounded(px(frame_r())).bg(Theme::bg_body()).shadow(crate::design::shadow::frame()))
@@ -802,13 +807,14 @@ pub(crate) fn render(v: &TableView, base: &Base, t: &Table, view: &View, window:
             // the frame only while the grid has the keys (or a cell, menu or list of its own is open):
             // with the record panel, a note or another pane in front, no cell is about to take them
             .children(cursor_ring(v, &cols).filter(|_| v.focus.is_focused(window) || v.editing.is_some() || v.popup.is_some() || v.dropdown.is_some()))
-            // scrolled sideways: the frozen columns cast a shadow over the ones passing under them
-            .when(sx > 0.5, |d| d.child(div().absolute().top_0().bottom_0().left(px(cols.frozen_w)).right_0().overflow_hidden()
-                // cast by a block just inside the edge, only what falls past it shown
-                .child(div().absolute().top_0().bottom_0().left(px(-24.)).w(px(24.)).bg(Theme::bg_body()).shadow(crate::design::shadow::sticky()))))
+            // scrolled sideways: the frozen columns cast a shadow over the ones passing under them, down to the
+            // frame's foot (the lane under them is theirs: the thumb starts past them)
+            .when(sx > 0.5, |d| d.child(div().absolute().top_0().bottom_0().left(px(cols.frozen_w)).right_0().overflow_hidden().child(caster().top_0().bottom(px(-ly)))))
             .children(col_edge(v, &cols))
             .children(col_grips(v, &cols, &fields, cx))
             .children(edit_overlay(v, &cols, &fields)))
+            // the rest of that shadow, across the bottom lane (laid out by the frame, as one with the part above)
+            .when(sx > 0.5 && ly > 0., |d| d.child(div().absolute().bottom_0().h(px(ly)).left(px(cols.frozen_w)).right_0().overflow_hidden().child(caster().bottom_0().h(px(header_h() + fh)))))
             .children(scrollbars(v, max_x, max_y, size(fw, header_h() + fh), (lx, ly), corner, cols.frozen_w, cx)))
         .on_scroll(cx.listener(move |v, ev: &ScrollEvent, _, cx| {
             let d = ev.delta.pixel_delta(px(20.));
@@ -829,7 +835,7 @@ pub(crate) fn render(v: &TableView, base: &Base, t: &Table, view: &View, window:
 /// on the straight edges only: down from under the header, across from past the frozen columns, and
 /// short of the sheet's `corner` or the other lane.
 fn scrollbars(v: &TableView, max_x: f32, max_y: f32, size_: Size<f32>, (lx, ly): (f32, f32), corner: f32, frozen_w: f32, cx: &Context<TableView>) -> Vec<AnyElement> {
-    use crate::design::scroll::{BAR, MIN, PAD, THUMB, ends_for, thumb_color};
+    use crate::design::scroll::{BAR, MIN, PAD, THUMB, ends_for};
     let mut out = vec![];
     let end = |other: f32| if other > 0. { other } else { ends_for(corner) };
     // the thumbs' places (from the grid's top left)
@@ -855,20 +861,22 @@ fn scrollbars(v: &TableView, max_x: f32, max_y: f32, size_: Size<f32>, (lx, ly):
             .on_mouse_down(MouseButton::Left, cx.listener(move |v, ev: &MouseDownEvent, _, cx| { cx.stop_propagation(); v.drag = Some(Drag::Thumb { across: true, p0: f32::from(ev.position.x), s0: v.scroll.x, per }); cx.notify(); }))
             .into_any_element());
     }
-    // drawn as the shared ScrollArea's (`design::scroll`): its width, inset and colour, shown while the
-    // pointer is over the grid, a thumb is held or it scrolls, fading out after
-    let fades = v.bar_fades.clone();
+    // drawn as the shared ScrollArea's (`design::scroll::Thumb`): its width, inset, colour and tones,
+    // shown while the pointer is over the grid, a thumb is held or it scrolls, fading out after
+    let thumbs = v.bar_thumbs.clone();
     let (sx, sy) = (v.scroll.x, v.scroll.y);
-    let held = matches!(v.drag, Some(Drag::Thumb { .. }));
+    let held = match v.drag { Some(Drag::Thumb { across, .. }) => Some(across), _ => None };
     out.push(canvas(|_, _, _| {}, move |b, _, window, cx| {
-        let over = b.contains(&window.mouse_position()) || held;
+        let over = b.contains(&window.mouse_position());
         if let Some((top, len, _)) = down {
-            let a = fades[0].step(over, sy, window, cx);
-            if a > 0. { window.paint_quad(fill(Bounds::new(point(b.right() - px(PAD + THUMB), b.top() + px(top)), size(px(THUMB), px(len))), thumb_color(a)).corner_radii(px(THUMB / 2.))); }
+            let thumb = Bounds::new(point(b.right() - px(PAD + THUMB), b.top() + px(top)), size(px(THUMB), px(len)));
+            let zone = Bounds::new(point(b.right() - px(BAR), b.top() + px(top)), size(px(BAR), px(len)));
+            thumbs[0].paint(thumb, zone, over || held.is_some(), held == Some(false), sy, window, cx);
         }
         if let Some((left, len, _)) = across {
-            let a = fades[1].step(over, sx, window, cx);
-            if a > 0. { window.paint_quad(fill(Bounds::new(point(b.left() + px(left), b.bottom() - px(PAD + THUMB)), size(px(len), px(THUMB))), thumb_color(a)).corner_radii(px(THUMB / 2.))); }
+            let thumb = Bounds::new(point(b.left() + px(left), b.bottom() - px(PAD + THUMB)), size(px(len), px(THUMB)));
+            let zone = Bounds::new(point(b.left() + px(left), b.bottom() - px(BAR)), size(px(len), px(BAR)));
+            thumbs[1].paint(thumb, zone, over || held.is_some(), held == Some(true), sx, window, cx);
         }
     }).absolute().inset_0().into_any_element());
     out

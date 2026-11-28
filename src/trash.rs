@@ -1,11 +1,13 @@
 //! 回收站 page and the confirmation dialogs (删除, 恢复, 彻底删除).
-//! Deleted pages wait in the library's `trash/` for 30 days; each row is a
+//! Deleted pages wait in the library's `trash/` for the 自动删除 days (1–30, the
+//! header's dropdown); each row is a
 //! deleted page together with the child pages that went with it.
 
 use crate::app::{Confirm, ConfirmCancel, ConfirmOk, Workspace};
 use crate::settings::display_title;
 use crate::search::doc_icon;
 use crate::store::{TRASH_DAYS, TrashEntry};
+use crate::design::{MenuItem, MenuLabel, MenuSeparator, Popover};
 pub(crate) use crate::ui::{ToastKind, list_header_text, row_hover, row_line};
 use crate::design::{Button, ButtonSize, Checkbox, Dialog};
 use crate::theme::{self, Theme};
@@ -17,9 +19,12 @@ pub const TRASH_MENU_W: f32 = crate::design::menu_w::SM;
 struct ListedTrash { lists: Vec<(String, Vec<TrashEntry>)>, warnings: Vec<String> }
 struct PurgedTrash { errors: Vec<String> }
 
+/// 自动删除's choices; 自定义 steps through the days between them.
+const DAY_CHOICES: [u64; 5] = [1, 3, 7, 14, 30];
+
 /// 剩余时间: whole days left before the automatic 彻底删除.
-fn remaining(deleted: u64) -> String {
-    let end = deleted + TRASH_DAYS * 86_400;
+fn remaining(deleted: u64, days: u64) -> String {
+    let end = deleted + days * 86_400;
     let left = end.saturating_sub(crate::time::now());
     if left < 86_400 { crate::settings::text("即将彻底删除").into() } else { crate::localized_count!(left.div_ceil(86_400), "{} 天", "{} day", "{} days", left.div_ceil(86_400)) }
 }
@@ -43,20 +48,24 @@ pub(crate) fn page_header_with(ws: &Workspace, title: impl IntoElement, left: f3
         .pl(if ws.sidebar_open { px(left) } else { px(theme::TRAFFIC_LIGHTS_W) })
         .pr(px(crate::ui::header_right_inset()))
         .title_bar()
-        .when(!ws.sidebar_open && cfg!(target_os = "windows"), |d| d.child(div().mr(px(12.)).child(ws.header_navigation(cx))))
-        .when(!ws.sidebar_open && !cfg!(target_os = "windows"), |d| {
+        // 回收站 (设置's sidebar): 展开侧栏, as 设置's own header; a folder's page: the toggle. Either
+        // way then the document header's rule, so the text after it starts where a document's
+        // path does (a plain title 4 further in: a path's links carry 4 of padding).
+        .when(!ws.sidebar_open && ws.view == crate::app::View::Trash, |d| d.child(ws.header_navigation(cx))
+            .child(div().ml(px(12.)).mr(px(16.)).child(crate::design::Separator::new().vertical().h(px(18.)))))
+        .when(!ws.sidebar_open && ws.view != crate::app::View::Trash, |d| {
             d.child(
                 Button::ghost("open-sidebar")
                     .no_drag()
                     .ml(px(4.))
-                    .mr(px(12.))
-                    .icon("panel-left-open")
+                    .icon("sidebar")
                     .tip(crate::settings::tr("展开侧栏", "Show sidebar"), Some(crate::shortcuts::hint("workspace::ToggleSidebar", "⌘ + ]")))
                     .on_click(cx.listener(|w, _, _, cx| {
                         w.sidebar_open = true;
                         cx.notify();
                     })),
             )
+            .child(div().mx(px(12.)).child(crate::design::Separator::new().vertical().h(px(18.))))
         })
         .child(title)
         .child(div().flex_1())
@@ -98,7 +107,14 @@ impl Workspace {
         // 清空回收站: a labelled button, only when there is something to empty.
         let empty = (!self.trash.is_empty()).then(|| Button::ghost("trash-empty").no_drag().mr(px(8.)).icon("bin").label(crate::settings::text("清空回收站"))
             .on_click(cx.listener(|w, _, _, cx| { w.trash_menu = None; w.confirm = Some(Confirm::EmptyTrash); cx.notify(); })));
-        let header = page_header(self, "回收站", 26., cx).children(empty).child(
+        // 自动删除: how long a page waits, a dropdown beside 清空回收站 (#410).
+        let days = self.store.trash_days();
+        let open = self.trash_days_menu;
+        let auto = Button::ghost("trash-days").no_drag().mr(px(4.)).selected(open)
+            .label(crate::localized_count!(days, "{} 天后自动删除", "Delete after {} day", "Delete after {} days", days)).icon_end("chevron-down")
+            .relative().child(self.folder_page.track("trash-days"))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |w, _, _, cx| { cx.stop_propagation(); w.trash_menu = None; w.trash_days_menu = !open; cx.notify(); }));
+        let header = page_header(self, "回收站", 26., cx).child(auto).children(empty).child(
             crate::ui::header_icon("trash-search", "search")
                 .tip_label(crate::shortcuts::keys(crate::settings::text("搜索(⌘ + J)")).into(), crate::ui::TipSide::Below)
                 .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(crate::app::FocusSearch), cx))),
@@ -121,7 +137,7 @@ impl Workspace {
         };
         // A row is lit while hovered or holding its menu; the lines touching it hide.
         let lit = |i: usize| self.trash.get(i).is_some_and(|t| {
-            self.home.list_hover.as_ref().is_some_and(|h| *h == format!("trash-row-{}", t.id))
+            self.folder_page.list_hover.as_ref().is_some_and(|h| *h == format!("trash-row-{}", t.id))
                 || self.trash_menu.as_ref().is_some_and(|(m, _, _)| *m == t.id)
         });
         let table_header = div()
@@ -136,7 +152,8 @@ impl Workspace {
             .child(col(Some(168.), "位置"))
             .child(col(Some(168.), "剩余时间"))
             .child(div().w(px(48.)).flex_none());
-        let mut list = div().id("trash-list").flex_1().min_h_0().overflow_y_scroll().px(px(24.)).pb(px(24.));
+        let scroll = crate::design::scroll::handle("trash-list");
+        let mut list = div().id("trash-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).px(px(24.)).pb(px(24.));
         for (i, t) in self.trash.iter().enumerate() {
             let (id, id2) = (t.id.clone(), t.id.clone());
             let menu_open = self.trash_menu.as_ref().is_some_and(|(m, _, _)| *m == t.id);
@@ -166,7 +183,7 @@ impl Workspace {
                     .items_center()
                     .when(i > 0, |d| d.border_t_1().border_color(row_line(lit(i - 1) || lit(i))))
                     .hover(row_hover)
-                    .on_hover(cx.listener(move |w, on: &bool, _, cx| if w.home.hover_row(&key, *on) { cx.notify() }))
+                    .on_hover(cx.listener(move |w, on: &bool, _, cx| if w.folder_page.hover_row(&key, *on) { cx.notify() }))
                     .when(menu_open, |d| d.bg(Theme::fill_hover()).rounded(px(ROW_RADIUS)))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -199,15 +216,17 @@ impl Workspace {
                             .child(icon("folder", 16., Theme::icon()))
                             .child(div().min_w_0().text_size(px(13.)).text_color(Theme::text_caption()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(self.trash_location(t)))),
                     )
-                    .child(div().w(px(168.)).flex_none().pl(px(20.)).text_size(px(13.)).text_color(Theme::text_caption()).child(remaining(t.deleted)))
+                    .child(div().w(px(168.)).flex_none().pl(px(20.)).text_size(px(13.)).text_color(Theme::text_caption()).child(remaining(t.deleted, days)))
                     .child(div().w(px(48.)).flex_none().flex().justify_end().pr(px(12.)).child(more)),
             );
         }
-        page = page.child(table_header).child(list);
+        // the shared scrollbar, down to the window's corner (the rows keep 24 from the side: room enough)
+        page = page.child(table_header).child(list.child(crate::design::scroll::bar_corners("trash-list", &scroll, 0., crate::design::scroll::WINDOW_R)));
         page.into_any_element()
     }
 
     pub(crate) fn render_trash_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.trash_days_menu { return self.render_trash_days_menu(cx) }
         let (id, pos, corner) = self.trash_menu.clone()?;
         let item = |key: &'static str, ic: &'static str, label: &'static str, danger: bool| crate::design::MenuItem::new(key).icon(ic).label(crate::settings::label(label)).destructive(danger);
         let (a, b) = (id.clone(), id);
@@ -237,15 +256,45 @@ impl Workspace {
         )
     }
 
+    /// 自动删除's menu: the usual days, then 自定义 a day at a time (1–30).
+    fn render_trash_days_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let b = self.view.eq(&crate::app::View::Trash).then(|| self.folder_page.anchor("trash-days")).flatten()?;
+        let days = self.store.trash_days();
+        let set = |n: u64, close: bool| cx.listener(move |w: &mut Workspace, _: &ClickEvent, _: &mut Window, cx: &mut Context<Workspace>| {
+            if w.store.set_trash_days(n).is_err() { w.show_toast(crate::settings::tr("设置保存失败", "Saving the setting failed"), cx); }
+            if close { w.trash_days_menu = false; }
+            w.trash = w.store.list_trash();
+            cx.notify();
+        });
+        let mut menu = Popover::new("trash-days-menu").menu().w(px(crate::design::menu_w::SM))
+            .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.trash_days_menu = false; cx.notify(); }))
+            .child(MenuLabel::new(crate::settings::tr("自动删除", "Auto-delete")));
+        for n in DAY_CHOICES {
+            menu = menu.child(MenuItem::new(SharedString::from(format!("trash-days-{n}"))).checked(days == n)
+                .label(crate::localized_count!(n, "{} 天后", "After {} day", "After {} days", n)).on_click(set(n, true)));
+        }
+        let step = |id: &'static str, ic: &'static str, n: u64, on: bool| Button::ghost(id).sized(ButtonSize::Xs).icon(ic).disabled(!on).on_click(set(n, false));
+        let custom = div().pl(px(12.)).pr(px(4.)).h(px(32.)).flex().items_center().gap(px(4.))
+            .child(div().flex_1().text_size(px(theme::ui_font())).child(crate::settings::tr("自定义", "Custom")))
+            .child(step("trash-days-minus", "minus", days.saturating_sub(1).max(1), days > 1))
+            .child(div().w(px(56.)).flex().justify_center().text_size(px(theme::ui_font())).child(crate::localized_count!(days, "{} 天", "{} day", "{} days", days)))
+            .child(step("trash-days-plus", "plus", (days + 1).min(TRASH_DAYS), days < TRASH_DAYS));
+        menu = menu.child(MenuSeparator::new()).child(custom);
+        let (pos, corner) = crate::design::hang(b, crate::design::Align::End, None);
+        Some(deferred(anchored().anchor(corner).position(pos).snap_to_window_with_margin(px(8.)).child(menu.fit(crate::design::room(pos, corner)))).with_priority(2).into_any_element())
+    }
+
     pub(crate) fn restore_doc(&mut self, id: &str, cx: &mut Context<Self>) {
         let file_before = self.store.track_file_changes();
         match self.store.restore(id) {
             Ok(moved) => {
-                self.show_toast(if moved { crate::settings::text("恢复成功。部分文档由于原位置不存在，已恢复到“我的文档”") } else { crate::settings::text("恢复成功") }, cx);
+                let t = crate::design::Toast::new(crate::ui::ToastKind::Success, crate::settings::text("恢复成功"));
+                // a page whose folder is gone came back to 我的文档
+                self.show_toast_with(if moved { t.description(crate::settings::tr("原位置已删除的文档放在了“我的文档”", "Pages whose folder is gone are in My documents")) } else { t }, cx);
             }
             Err(e) => {
                 let detail = e.chain().map(|cause| crate::settings::diagnostic(&cause.to_string())).collect::<Vec<_>>().join(": ");
-                let msg = crate::localized_format!("恢复失败：{}", "Could not restore document: {}", detail);
+                let msg = crate::localized_format!("恢复失败：{}", "Restoring the document failed: {}", detail);
                 self.show_toast_kind(crate::ui::ToastKind::Error, &msg, cx);
                 self.status = crate::app::SaveStatus::Failed(msg);
             }
@@ -308,7 +357,7 @@ impl Workspace {
                 errors.extend(listed.warnings.iter().map(|s| crate::settings::diagnostic(s)));
                 if errors.is_empty() { w.show_toast(success, cx); }
                 else {
-                    let msg = errors.iter().map(|e| crate::localized_format!("删除失败：{}", "Could not delete document: {}", crate::settings::diagnostic(e))).collect::<Vec<_>>().join("；");
+                    let msg = errors.iter().map(|e| crate::localized_format!("删除失败：{}", "Deleting the document failed: {}", crate::settings::diagnostic(e))).collect::<Vec<_>>().join("；");
                     w.show_toast_kind(crate::ui::ToastKind::Error, &msg, cx);
                     w.status = crate::app::SaveStatus::Failed(msg);
                 }
@@ -320,7 +369,7 @@ impl Workspace {
     /// What the unused-asset sweep (#237) reads besides the library: the
     /// sources every open editor holds — this window's and the others',
     /// quick notes included — that the disk does not (unsaved text, the
-    /// snapshots Undo can still bring back), and the 本机文件 and 本机文件夹,
+    /// snapshots Undo can still bring back), and the files opened on their own,
     /// whose pasted pictures are copied into the library's assets too.
     pub(crate) fn sweep_inputs(&self, window: &Window, cx: &Context<Self>) -> (Vec<String>, Vec<std::path::PathBuf>) {
         let mut live: Vec<String> = self.editor.as_ref().map(|e| e.read(cx).core.asset_refs()).unwrap_or_default();
@@ -336,7 +385,8 @@ impl Workspace {
 
     pub(crate) fn sweep_failed(&mut self, e: &anyhow::Error, cx: &mut Context<Self>) {
         log::warn!("unused assets: {e:#}");
-        self.show_toast_kind(ToastKind::Error, &crate::localized_format!("无法读取文档库，未清理：{}", "Could not read the library; nothing was removed: {}", e), cx);
+        self.show_toast_with(crate::design::Toast::new(ToastKind::Error, crate::settings::tr("读取文档库失败", "Reading the library failed"))
+            .description(crate::localized_format!("文件都保持原样：{}", "Every file stays as it was: {}", e)), cx);
     }
 
     /// 设置 › 文档库 › 未使用资源 (#237): take away the listed files that are
@@ -353,7 +403,7 @@ impl Workspace {
                 anyhow::Ok(crate::store::Store::remove_unused_assets(&root, &names))
             }).await;
             let _ = this.update(cx, |w, cx| match gone {
-                Ok(0) => w.show_toast(crate::settings::text("没有可清理的资源"), cx),
+                Ok(0) => w.show_toast_kind(ToastKind::Info, crate::settings::text("资源都在使用中"), cx),
                 Ok(n) => w.show_toast_kind(ToastKind::Success, &crate::localized_format!("已移出 {} 个未使用资源", "Moved {} unused assets out of the asset folder", n), cx),
                 Err(e) => w.sweep_failed(&e, cx),
             });
@@ -446,7 +496,19 @@ impl Workspace {
         let (title, body, action, danger) = match c {
             Confirm::Delete { ids, batch } => (
                 if *batch || ids.len() > 1 { crate::localized_count!(ids.len(), "是否删除所选的 {} 项？", "Delete the {} selected item?", "Delete the {} selected items?", ids.len()) } else { crate::localized_format!("是否删除： {}？", "Delete {}?", title_of(&ids[0])) },
-                crate::settings::text("删除的内容将进入回收站，30 天后自动彻底删除").to_string(),
+                {
+                    // A folder goes with what is in it: say how much (备忘录's 「其中的 N 条笔记也会删除」).
+                    let m = crate::tree::Tree::new(&self.entries).docs_inside(ids);
+                    let body = if m > 0 { crate::localized_count!(m, "包括其中的 {} 篇文档。删除的内容将进入回收站，30 天后自动彻底删除", "This includes the {} document inside. Deleted items will be moved to Trash and permanently deleted after 30 days.", "This includes the {} documents inside. Deleted items will be moved to Trash and permanently deleted after 30 days.", m) }
+                    else { crate::settings::text("删除的内容将进入回收站，30 天后自动彻底删除").to_string() };
+                    // A folder that is (or holds) a top-level folder of its own (workspaces.md 2.6): it leaves the sidebar too.
+                    let dirs: Vec<std::path::PathBuf> = ids.iter().filter(|id| self.entries.iter().any(|e| e.id == **id && e.meta.folder.is_some())).filter_map(|id| self.store.folder_dir(Some(id))).collect();
+                    match self.store.tops_within(&dirs).as_slice() {
+                        [] => body,
+                        [(_, name)] => format!("{} {}", crate::localized_format!("「{}」也是侧栏里的一个顶层文件夹，会一起从侧栏移除。", "“{}” is also a top-level folder in the sidebar and leaves it too.", name), body),
+                        more => format!("{} {}", crate::localized_count!(more.len(), "其中有 {} 个也是侧栏里的顶层文件夹，会一起从侧栏移除。", "{} of them is also a top-level folder in the sidebar and leaves it too.", "{} of them are also top-level folders in the sidebar and leave it too.", more.len()), body),
+                    }
+                },
                 crate::settings::text("删除"),
                 true,
             ),
@@ -477,7 +539,7 @@ impl Workspace {
                 let why = match reason {
                     ConsentReason::Synced(SyncService::Provider(p)) => crate::localized_format!("文档库在 {p} 同步的文件夹里。", "The library is in a folder synced by {p}. "),
                     ConsentReason::Synced(_) => crate::settings::tr("文档库在 iCloud 云盘里。", "The library is in iCloud Drive. ").to_string(),
-                    ConsentReason::OtherDevice(DeviceHint::MissingFile(p)) => crate::localized_format!("这个文档库可能也在别的电脑上使用（打开过的本机文件 {p} 不在这台电脑上）。", "This library may also be used on another computer (a local file it opened, {p}, isn't on this one). "),
+                    ConsentReason::OtherDevice(DeviceHint::MissingFile(p)) => crate::localized_format!("这个文档库可能也在别的电脑上使用（单独打开过的文件 {p} 不在这台电脑上）。", "This library may also be used on another computer (a file opened on its own, {p}, isn't on this one). "),
                     ConsentReason::OtherDevice(DeviceHint::SyncCopy(n)) => crate::localized_format!("这个文档库可能也在别的电脑上使用（同步留下了 {n}）。", "This library may also be used on another computer (sync left {n} behind). "),
                     ConsentReason::Restored => crate::settings::tr("你之前把文档库恢复成了原来的存放方式。", "You went back to the old layout before. ").to_string(),
                 };
@@ -505,7 +567,6 @@ impl Workspace {
             Confirm::Import { what, target } => {
                 let place = self.drop_place(target);
                 let what_s = match what {
-                    crate::app::DropImport::Local(id) => crate::localized_format!("「{}」", "“{}”", title_of(id)),
                     crate::app::DropImport::Files(p) if p.len() == 1 => crate::localized_format!("「{}」", "“{}”", p[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
                     crate::app::DropImport::Files(p) => crate::localized_format!("这 {} 项", "these {} items", p.len()),
                 };
