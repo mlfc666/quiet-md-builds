@@ -48,9 +48,25 @@ if git merge-base --is-ancestor "$ref" HEAD; then
   echo "$branch already contains $ref."
 else
   if ! git merge --no-edit "$ref"; then
-    echo "::error::$ref conflicts with this fork; merge it by hand." >&2
-    git merge --abort || true
-    exit 1
+    unresolved=$(git diff --name-only --diff-filter=U)
+    # A workflow file conflicts whenever upstream edits one this fork keeps at
+    # main's version — the branch deliberately holds the older copy, so the
+    # three-way merge cannot tell which side wins. These files are settled below
+    # anyway; anything else is a real conflict and stops the run.
+    if [ -n "$unresolved" ] && [ -z "$(printf '%s\n' "$unresolved" | grep -v '^\.github/workflows/')" ]; then
+      echo 'Only workflow files conflict; this fork keeps its own.'
+      while read -r path; do
+        [ -z "$path" ] && continue
+        git checkout --ours -- "$path" 2>/dev/null || git rm -q -f "$path"
+        git add -- "$path"
+      done <<< "$unresolved"
+      git commit -q --no-edit
+    else
+      echo "::error::$ref conflicts with this fork outside .github/workflows/; merge it by hand:" >&2
+      printf '%s\n' "$unresolved" >&2
+      git merge --abort || true
+      exit 1
+    fi
   fi
 fi
 
