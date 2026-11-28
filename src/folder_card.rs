@@ -839,10 +839,9 @@ impl Workspace {
         d.land.to = 1.;
         d.dip.v += 5.5;
         if let Some(f) = d.over.as_ref().and_then(|k| self.folder_page.folders.fx.get_mut(k)) { f.dip.v += 5.5; }
-        let (dirs, files): (Vec<_>, Vec<_>) = d.paths.iter().cloned().partition(|p| p.fs_is_dir());
-        let files: Vec<_> = files.into_iter().filter(|p| crate::local_files::is_markdown_path(p) || p.extension().is_some_and(|x| x.eq_ignore_ascii_case("xml"))).collect();
-        if !files.is_empty() { self.import_paths(&files, target.clone(), false, window, cx); }
-        for dir in &dirs { self.import_folder(dir, target.clone(), false, window, cx); }
+        // Files and folders in one import: one at a time, a second would be dropped while the first runs.
+        let paths: Vec<_> = d.paths.iter().filter(|p| p.fs_is_dir() || crate::local_files::is_markdown_path(p) || p.extension().is_some_and(|x| x.eq_ignore_ascii_case("xml"))).cloned().collect();
+        if !paths.is_empty() { self.import_paths(&paths, target, false, window, cx); }
         cx.notify();
     }
 

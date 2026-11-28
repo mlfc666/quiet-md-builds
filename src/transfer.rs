@@ -51,7 +51,41 @@ pub(crate) struct Listed { key: String, writer: crate::store::Store, entries: Ve
 impl Listed {
     fn of(key: String, mut writer: crate::store::Store) -> Self { let entries = writer.list(); Listed { key, writer, entries } }
 }
-struct ImportedFiles { last: Option<String>, failed: bool, done: usize, changes: Vec<crate::store::FileDelta> }
+struct ImportedFiles { brought: Brought, changes: Vec<crate::store::FileDelta> }
+
+/// What `import_all` brought in: `made`, each file or folder made at the place, in order (`folder`:
+/// made from a folder); `last`, the last document; `done`, documents in all; `bad`, a loose file
+/// that could not be read; `failed`, documents inside folders that could not; `cloud`, those left
+/// in iCloud; `empty`, folders with nothing to import; `too_many`, the documents when over the limit.
+#[derive(Default)]
+pub(crate) struct Brought { made: Vec<(String, bool)>, last: Option<String>, done: usize, bad: bool, failed: usize, cloud: usize, empty: usize, too_many: Option<usize> }
+
+/// Files and folders dropped together into `parent`, as one import: a folder
+/// with all it holds, as 导入文件夹 brings it (`scan_folder`), a file as
+/// `import_file`. Imported one by one, the folders would wait behind the
+/// files' file task and be lost, as was a level's contents dropped. Needs no window.
+pub(crate) fn import_all(store: &mut crate::store::Store, paths: &[PathBuf], parent: Option<&str>) -> Brought {
+    let mut b = Brought::default();
+    let trees: Vec<Option<Option<Scanned>>> = paths.iter().map(|p| p.fs_is_dir().then(|| scan_folder(p, 0))).collect();
+    let total = trees.iter().map(|t| match t { Some(t) => t.as_ref().map_or(0, |t| t.files), None => 1 }).sum::<usize>();
+    if total > IMPORT_FOLDER_LIMIT { b.too_many = Some(total); return b; }
+    for (p, t) in paths.iter().zip(trees) {
+        match t {
+            Some(Some(t)) if t.files > 0 => {
+                b.cloud += t.cloud;
+                let before = b.failed;
+                if let Some(id) = import_tree(store, &t, parent, &mut b.failed) { b.made.push((id, true)); }
+                b.done += t.files.saturating_sub(b.failed - before);
+            }
+            Some(t) => { b.cloud += t.map_or(0, |t| t.cloud); b.empty += 1; }
+            None => match import_file(store, p, parent) { Ok(id) => { b.made.push((id.clone(), false)); b.last = Some(id); b.done += 1 } Err(_) => b.bad = true },
+        }
+    }
+    b
+}
+
+/// What `import_paths_then` does with what it made, once it is in (a drop puts it in its slot).
+pub(crate) type AfterImports = Box<dyn FnOnce(&mut Workspace, &[String])>;
 
 /// A folder to import: its documents and the sub-folders that hold some;
 /// `cloud`: the documents and folders under it left out as only in iCloud.
@@ -548,14 +582,29 @@ impl Workspace {
     /// Import files into `parent` (a folder; None: the top of 我的文档); with
     /// `open`, the last one opens (a drop on a list stays on the list).
     pub(crate) fn import_paths(&mut self, paths: &[PathBuf], parent: Option<String>, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.import_paths_then(paths, parent, open, None, window, cx)
+    }
+
+    /// `import_paths` of files and folders, then `then` with what came in at `parent`.
+    /// A lone folder is 导入文件夹's (its own messages); with files beside it, all in one import (`import_all`).
+    pub(crate) fn import_paths_then(&mut self, paths: &[PathBuf], parent: Option<String>, open: bool, then: Option<AfterImports>, window: &mut Window, cx: &mut Context<Self>) {
+        if let [dir] = paths && dir.fs_is_dir() {
+            let then = then.map(|t| Box::new(move |w: &mut Workspace, id: &str| t(w, &[id.to_string()])) as AfterImport);
+            return self.import_folder_then(dir, parent, open, then, window, cx);
+        }
         if self.store.file_task_busy() || self.file_history.busy { return; }
         // Behind a rename or move on its way: the folder it goes into may be the one moving.
-        let (later, into) = (paths.to_vec(), parent.clone());
-        if self.after_tree_writes(move |w, window, cx| w.import_paths(&later, into, open, window, cx)) { return; }
-        let (again, retry) = (paths.to_vec(), parent.clone());
-        if !self.save_before(cx, move |w, window, cx| w.import_paths(&again, retry.clone(), open, window, cx)) {
+        if self.tree_writes_pending() {
+            let (later, into) = (paths.to_vec(), parent.clone());
+            self.after_tree_writes(move |w, window, cx| w.import_paths_then(&later, into, open, then, window, cx));
             return;
         }
+        let held = std::rc::Rc::new(std::cell::Cell::new(then));
+        let (again, retry, later) = (paths.to_vec(), parent.clone(), held.clone());
+        if !self.save_before(cx, move |w, window, cx| w.import_paths_then(&again, retry.clone(), open, later.take(), window, cx)) {
+            return;
+        }
+        let then = held.take();
         let Some((key, mut writer)) = self.store.tree_writer(parent.as_deref()) else { return self.show_toast_kind(ToastKind::Error, &crate::shared_store::no_folder().to_string(), cx) };
         let Some(task_guard) = self.store.begin_file_task() else { return };
         let place = self.place_name(parent.as_deref());
@@ -563,15 +612,10 @@ impl Workspace {
         let paths = paths.to_vec();
         let task = cx.background_executor().spawn(async move {
             let journal = writer.track_file_changes();
-            let mut last = None;
-            let mut failed = false;
-            let mut done = 0;
             let batch = writer.begin_batch().is_ok();
-            for p in &paths {
-                match import_file(&mut writer, p, parent.as_deref()) { Ok(id) => { last = Some(id); done += 1 } Err(_) => failed = true }
-            }
-            if batch && writer.end_batch().is_err() { failed = true; }
-            (ImportedFiles { last, failed, done, changes: journal.take() }, Listed::of(key, writer))
+            let mut brought = import_all(&mut writer, &paths, parent.as_deref());
+            if batch && writer.end_batch().is_err() { brought.bad = true; }
+            (ImportedFiles { brought, changes: journal.take() }, Listed::of(key, writer))
         });
         self.show_toast_kind(ToastKind::Info, crate::settings::tr("正在导入…", "Importing…"), cx);
         cx.spawn_in(window, async move |this, cx| {
@@ -580,10 +624,19 @@ impl Workspace {
             let _ = this.update_in(cx, |w, window, cx| {
                 w.take_import(listed, cx);
                 w.remember_file_changes(imported.changes, crate::settings::tr("导入", "Import"));
-                if let Some(id) = imported.last.filter(|_| open) { w.open(&id, window, cx); }
-                if imported.failed { w.show_toast_kind(ToastKind::Error, crate::settings::text("导入失败，请检查文件格式"), cx); }
+                let b = imported.brought;
+                let made: Vec<String> = b.made.iter().map(|(id, _)| id.clone()).collect();
+                if let Some(then) = then { then(w, &made); }
+                for (id, _) in b.made.iter().filter(|(_, folder)| *folder) { w.reveal_in_tree(id); }
+                // The last document, else the last folder.
+                if let Some(id) = b.last.clone().or_else(|| made.last().cloned()).filter(|_| open) { w.open(&id, window, cx); }
+                if let Some(files) = b.too_many {
+                    w.show_toast_kind(ToastKind::Error, &crate::localized_format!("共有 {} 个文件，一次最多导入 {} 个", "There are {} files; up to {} can be imported at once", files, IMPORT_FOLDER_LIMIT), cx);
+                } else if b.bad { w.show_toast_kind(ToastKind::Error, crate::settings::text("导入失败，请检查文件格式"), cx); }
+                else if let Some(msg) = import_problems(b.failed, b.cloud) { w.show_toast_kind(ToastKind::Error, &msg, cx); }
+                else if b.done == 0 && b.empty > 0 { w.show_toast_kind(ToastKind::Error, crate::settings::tr("请选含有 Markdown 或 XML 文件的文件夹", "Pick a folder with Markdown or XML files"), cx); }
                 // 导入 copies: say into where, and that the originals stay as they were.
-                else { w.show_toast_with(crate::design::Toast::new(ToastKind::Success, crate::localized_count!(imported.done, "已复制 {} 个文件到「{}」", "Copied {} file into “{}”", "Copied {} files into “{}”", imported.done, place))
+                else { w.show_toast_with(crate::design::Toast::new(ToastKind::Success, crate::localized_count!(b.done, "已复制 {} 个文件到「{}」", "Copied {} file into “{}”", "Copied {} files into “{}”", b.done, place))
                     .description(crate::settings::tr("原文件保持原样", "The originals stay as they were")), cx); }
                 cx.notify();
             });
@@ -1197,6 +1250,79 @@ mod tests {
         assert!(matches!(doc.blocks[4].kind, BlockKind::Heading { level: 2, .. }));
         assert_eq!(percent_decode("a%20b%E5%9B%BE.png"), "a b图.png");
         let _ = fdl_core::vfs::remove_dir_all(dir);
+    }
+
+    /// A three-level folder like the one a user's report described: notes at every level, a level
+    /// with only folders in it, `.MD` and `.markdown`, names with spaces and Chinese; relative links
+    /// and pictures between the levels.
+    fn nested(from: &std::path::Path) -> std::path::PathBuf {
+        let n = from.join("Notes");
+        for d in ["Top note/层二 文件夹/Level 3", "Only folders/Middle/Deep", "pics"] { std::fs::create_dir_all(n.join(d)).unwrap(); }
+        image::RgbImage::new(2, 2).save(n.join("pics/dot.png")).unwrap();
+        std::fs::write(n.join("Root.md"), "See [leaf](Top%20note/%E5%B1%82%E4%BA%8C%20%E6%96%87%E4%BB%B6%E5%A4%B9/Level%203/Leaf.md)\n\n![dot](pics/dot.png)\n").unwrap();
+        std::fs::write(n.join("Top note/UPPER.MD"), "upper").unwrap();
+        std::fs::write(n.join("Top note/层二 文件夹/中文 笔记.markdown"), "中").unwrap();
+        std::fs::write(n.join("Top note/层二 文件夹/Level 3/Leaf.md"), "Back to [root](../../../Root.md)\n\n![dot](../../../pics/dot.png)\n").unwrap();
+        std::fs::write(n.join("Only folders/Middle/Deep/Deepest.md"), "deep").unwrap();
+        n
+    }
+
+    /// Each document of `nested` where it went, relative to the folder it was imported into.
+    fn landed(store: &mut crate::store::Store, into: &std::path::Path) -> Vec<String> {
+        let list = store.list();
+        let mut got: Vec<String> = list.iter().filter_map(|e| store.file_path(&e.id)).filter(|p| p.is_file()).filter_map(|p| p.strip_prefix(into).ok().map(|p| p.to_string_lossy().into_owned())).collect();
+        got.sort();
+        got
+    }
+
+    const NESTED: [&str; 5] = ["Notes/Only folders/Middle/Deep/Deepest.md", "Notes/Root.md", "Notes/Top note/UPPER.md", "Notes/Top note/层二 文件夹/Level 3/Leaf.md", "Notes/Top note/层二 文件夹/中文 笔记.md"];
+
+    /// 导入文件夹 (and 从其他应用导入, a folder dropped: all `scan_folder` and `import_tree`) keeps
+    /// every level, a level holding only folders too; links between the levels still lead to their
+    /// notes and pictures are copied in, written relative to each note.
+    #[test]
+    fn a_nested_folder_keeps_every_level() {
+        let (tmp, from, mut store) = places("nested");
+        let notes = nested(&from);
+        let tree = super::scan_folder(&notes, 0).unwrap();
+        assert_eq!(tree.files, 5);
+        let only = tree.dirs.iter().find(|d| d.name == "Only folders").unwrap();
+        assert!(only.docs.is_empty() && only.dirs[0].docs.is_empty() && only.dirs[0].dirs[0].docs.len() == 1);
+        let mut failed = 0;
+        store.batch(|s| super::import_tree(s, &tree, None, &mut failed)).unwrap().unwrap();
+        assert_eq!(failed, 0);
+        let lib = tmp.join("library");
+        assert_eq!(landed(&mut store, &lib), NESTED);
+        // The folders are in the library's tree as on disk, the one with only folders in it too.
+        let folders: Vec<String> = store.list().into_iter().filter(|e| store.file_path(&e.id).is_none()).map(|e| e.title).collect();
+        assert_eq!(folders.len(), 7, "{folders:?}");
+        for f in ["Notes", "Top note", "层二 文件夹", "Level 3", "Only folders", "Middle", "Deep"] { assert!(folders.contains(&f.to_string()), "{f}: {folders:?}"); }
+        for (note, target) in [("Notes/Root.md", "Notes/Top note/层二 文件夹/Level 3/Leaf.md"), ("Notes/Top note/层二 文件夹/Level 3/Leaf.md", "Notes/Root.md")] {
+            let file = lib.join(note);
+            let text = std::fs::read_to_string(&file).unwrap();
+            let link = text.split("](").nth(1).unwrap().split(')').next().unwrap();
+            assert_eq!(file.parent().unwrap().join(super::percent_decode(link)).canonicalize().unwrap(), lib.join(target).canonicalize().unwrap(), "{text}");
+            let pic = text.rsplit("](").next().unwrap().split(')').next().unwrap();
+            assert!(pic.contains(".assets/") && file.parent().unwrap().join(pic).is_file(), "{text}");
+        }
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    /// A level's contents dropped together, files and folders: every folder comes in with all its
+    /// levels beside the files (one import; the folders were lost behind the files' import), a folder
+    /// with nothing to import is counted, not made.
+    #[test]
+    fn files_and_folders_dropped_together_keep_their_levels() {
+        let (tmp, from, mut store) = places("dropped");
+        let notes = nested(&from);
+        let paths: Vec<_> = ["Root.md", "Top note", "Only folders", "pics"].iter().map(|n| notes.join(n)).collect();
+        let b = store.batch(|s| super::import_all(s, &paths, None)).unwrap();
+        assert_eq!((b.done, b.failed, b.bad, b.empty, b.too_many), (5, 0, false, 1, None));
+        assert_eq!(b.made.iter().map(|(_, folder)| *folder).collect::<Vec<_>>(), [false, true, true]);
+        assert_eq!(b.last.as_ref(), Some(&b.made[0].0));
+        let got = landed(&mut store, &tmp.join("library"));
+        assert_eq!(got, NESTED.iter().map(|p| p.strip_prefix("Notes/").unwrap()).collect::<Vec<_>>());
+        std::fs::remove_dir_all(tmp).unwrap();
     }
 
     /// A temporary library and a folder of files to import.
