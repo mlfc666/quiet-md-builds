@@ -11,21 +11,25 @@
 # disjoint and cannot conflict. A future change that does touch upstream code
 # surfaces as a conflict instead of a silently dropped patch.
 #
-# Why this fork's `.github/workflows/` always wins: GITHUB_TOKEN is a GitHub App
-# token and GitHub rejects a push that creates or updates a workflow file with
-# it, so an upstream CI change cannot be carried over even when it merges
-# cleanly. `checkout <tree> -- <dir>` restores the files that existed but keeps
-# the ones upstream just added, hence the second loop.
+# Why `.github/workflows/` always comes from `main`, whatever the target branch:
+# GITHUB_TOKEN is a GitHub App token and GitHub rejects a push that creates or
+# updates a workflow file with it, so upstream's CI cannot be carried over even
+# when it merges cleanly; and a branch that kept its own copy of the workflows
+# would go stale the moment main's are edited, leaving daily tags built by an
+# old build script. `main` is the one place these files are edited.
 #
 # Prints `updated=true` or `updated=false` as its last line.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# Not `dirname $0`: CI runs a copy of this script from $RUNNER_TEMP, because the
+# branch may still carry an older copy and it is the merge that fixes that.
+cd "$(git rev-parse --show-toplevel)"
 
 branch=${1:?usage: ci-merge-upstream.sh <branch> <upstream-ref> [<base-ref>]}
 ref=${2:?usage: ci-merge-upstream.sh <branch> <upstream-ref> [<base-ref>]}
 base=${3:-}
 
 git fetch --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
+git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main' 2>/dev/null || true
 
 exists=false
 if git rev-parse -q --verify "refs/remotes/origin/$branch" > /dev/null; then
@@ -40,33 +44,69 @@ else
 fi
 
 git checkout -q -B "$branch" "$start"
+before=$(git rev-parse HEAD)
 
 if git merge-base --is-ancestor "$ref" HEAD; then
   echo "$branch already contains $ref."
-  if [ "$exists" = true ]; then
-    echo 'updated=false'
-    exit 0
+else
+  if ! git merge --no-edit "$ref"; then
+    unresolved=$(git diff --name-only --diff-filter=U)
+    # A workflow file conflicts whenever upstream edits one this fork keeps at
+    # main's version — the branch deliberately holds the older copy, so the
+    # three-way merge cannot tell which side wins. These files are settled below
+    # anyway; anything else is a real conflict and stops the run.
+    if [ -n "$unresolved" ] && [ -z "$(printf '%s\n' "$unresolved" | grep -v '^\.github/workflows/')" ]; then
+      echo 'Only workflow files conflict; this fork keeps its own.'
+      while read -r path; do
+        [ -z "$path" ] && continue
+        git checkout --ours -- "$path" 2>/dev/null || git rm -q -f "$path"
+        git add -- "$path"
+      done <<< "$unresolved"
+      git commit -q --no-edit
+    else
+      echo "::error::$ref conflicts with this fork outside .github/workflows/; merge it by hand:" >&2
+      printf '%s\n' "$unresolved" >&2
+      git merge --abort || true
+      exit 1
+    fi
   fi
-  # The first run still has to put the branch on origin, even when there is
-  # nothing to merge yet.
-  git push origin "HEAD:refs/heads/$branch"
-  echo 'updated=true'
-  exit 0
 fi
 
-before=$(git rev-parse HEAD)
-if ! git merge --no-edit "$ref"; then
-  echo "::error::$ref conflicts with this fork; merge it by hand." >&2
-  git merge --abort || true
-  exit 1
-fi
+# Main's workflows win, and upstream's added ones go: `checkout <tree> -- <dir>`
+# restores the files that exist there but keeps the ones it does not have.
+git checkout origin/main -- .github/workflows/
+for kept in $(git ls-files .github/workflows); do
+  if ! git cat-file -e "origin/main:$kept" 2>/dev/null; then
+    git rm -q -f "$kept"
+  fi
+done
 
-git checkout "$before" -- .github/workflows/
-for added in $(git diff --name-only --diff-filter=A "$before" HEAD -- .github/workflows/); do
-  git rm -q -f "$added"
+# This fork's own files come from main too. They exist nowhere upstream, so a
+# branch that kept its first copy would keep building the old merge script and
+# the old Arch recipe forever — which is how the release step once ran a script
+# from two days earlier. The list is explicit because "not in the upstream ref"
+# is not the same thing: upstream moves and deletes files, and that test would
+# resurrect every guide they renamed.
+fork_files=(
+  scripts/ci-merge-upstream.sh
+  scripts/package-arch.sh
+  BUILDS.md
+)
+for fork_file in "${fork_files[@]}"; do
+  if git cat-file -e "origin/main:$fork_file" 2>/dev/null; then
+    git checkout origin/main -- "$fork_file"
+  fi
 done
 if ! git diff --cached --quiet; then
-  git commit -q -m "ci: keep this fork's workflows (upstream CI is not used here)"
+  git commit -q -m "ci: this fork's workflows, from main"
+fi
+
+# A first run has to put the branch on origin even when there was nothing to
+# merge; later runs only move it when a commit was made.
+if [ "$exists" = true ] && [ "$(git rev-parse HEAD)" = "$before" ]; then
+  echo "$branch is up to date."
+  echo 'updated=false'
+  exit 0
 fi
 
 # The branch only moves under this script, but a human push could still land
